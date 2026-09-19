@@ -3,13 +3,15 @@ package payment
 import (
 	"context"
 	"crypto/rand"
-	"encoding/hex"
 	"errors"
+	"fmt"
 
 	"minipay/internal/store"
 )
 
 var ErrInvalidAmount = errors.New("amount must be positive")
+
+var ErrUnsupportedCurrency = errors.New("unsupported currency")
 
 type OrderService struct {
 	Repo *store.OrderRepository
@@ -22,7 +24,18 @@ func newID() (string, error) {
 		return "", err
 	}
 
-	return hex.EncodeToString(b[:]), nil
+	// Set UUID version 4 and variant bits.
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+
+	return fmt.Sprintf(
+		"%08x-%04x-%04x-%04x-%012x",
+		b[0:4],
+		b[4:6],
+		b[6:8],
+		b[8:10],
+		b[10:16],
+	), nil
 }
 
 func (s *OrderService) CreateOrder(
@@ -36,7 +49,7 @@ func (s *OrderService) CreateOrder(
 	}
 
 	if currency != "INR" {
-		return store.Order{}, errors.New("unsupported currency")
+		return store.Order{}, ErrUnsupportedCurrency
 	}
 
 	id, err := newID()

@@ -3,8 +3,9 @@ package store
 import (
 	"context"
 	"fmt"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"os"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 func NewPostgres(ctx context.Context) (*pgxpool.Pool, error) {

@@ -25,8 +25,8 @@ func (r *OrderRepository) Create(
 	_, err := r.DB.Exec(
 		ctx,
 		`INSERT INTO orders
-            (id, merchant_id, amount, currency, status)
-         VALUES ($1, $2, $3, $4, $5)`,
+			(id, merchant_id, amount, currency, status)
+		 VALUES ($1, $2, $3, $4, $5)`,
 		order.ID,
 		order.MerchantID,
 		order.Amount,

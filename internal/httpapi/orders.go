@@ -1,12 +1,14 @@
 package httpapi
 
 import (
-	"crypto/rand"
-	"encoding/hex"
+	"context"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
-	"sync"
 	"time"
+
+	"minipay/internal/payment"
 )
 
 type CreateOrderRequest struct {
@@ -14,30 +16,14 @@ type CreateOrderRequest struct {
 	Currency string `json:"currency"`
 }
 
-type Order struct {
-	ID        string    `json:"id"`
-	Amount    int64     `json:"amount"`
-	Currency  string    `json:"currency"`
-	Status    string    `json:"status"`
-	CreatedAt time.Time `json:"created_at"`
+type OrderHandler struct {
+	Service *payment.OrderService
 }
 
-var (
-	mu     sync.Mutex
-	orders = make(map[string]Order)
-)
-
-func newID() (string, error) {
-	var b [16]byte
-
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-
-	return hex.EncodeToString(b[:]), nil
-}
-
-func CreateOrder(w http.ResponseWriter, r *http.Request) {
+func (h *OrderHandler) CreateOrder(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
 	if r.Method != http.MethodPost {
 		http.Error(
 			w,
@@ -56,58 +42,49 @@ func CreateOrder(w http.ResponseWriter, r *http.Request) {
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		http.Error(
-			w,
-			"invalid JSON",
-			http.StatusBadRequest,
-		)
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
 
-	if req.Amount <= 0 {
-		http.Error(
-			w,
-			"amount must be positive",
-			http.StatusBadRequest,
-		)
+	// Reject trailing JSON values.
+	var extra any
+	if err := decoder.Decode(&extra); err == nil {
+		http.Error(w, "unexpected trailing JSON", http.StatusBadRequest)
 		return
 	}
 
-	if req.Currency != "INR" {
-		http.Error(
-			w,
-			"unsupported currency",
-			http.StatusBadRequest,
-		)
-		return
-	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
 
-	id, err := newID()
+	// Temporary demo merchant.
+	// Later, we'll get this from authenticated merchant identity.
+	order, err := h.Service.CreateOrder(
+		ctx,
+		"demo-merchant",
+		req.Amount,
+		req.Currency,
+	)
+
 	if err != nil {
-		http.Error(
-			w,
-			"could not create order",
-			http.StatusInternalServerError,
-		)
+		switch {
+		case errors.Is(err, payment.ErrInvalidAmount),
+			errors.Is(err, payment.ErrUnsupportedCurrency):
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		default:
+			log.Printf("create order failed: %v", err)
+			http.Error(
+				w,
+				"could not create order",
+				http.StatusInternalServerError,
+			)
+		}
 		return
 	}
-
-	order := Order{
-		ID:        id,
-		Amount:    req.Amount,
-		Currency:  req.Currency,
-		Status:    "CREATED",
-		CreatedAt: time.Now().UTC(),
-	}
-
-	mu.Lock()
-	orders[id] = order
-	mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 
 	if err := json.NewEncoder(w).Encode(order); err != nil {
-		return
+		log.Printf("encode order response: %v", err)
 	}
 }

@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
+	"minipay/internal/payment"
+	"minipay/internal/store"
 	"net/http"
 	"time"
-
-	"minipay/internal/payment"
 )
 
 type CreateOrderRequest struct {
@@ -46,30 +47,55 @@ func (h *OrderHandler) CreateOrder(
 		return
 	}
 
-	// Reject trailing JSON values.
+	// Require exactly one JSON value.
 	var extra any
-	if err := decoder.Decode(&extra); err == nil {
-		http.Error(w, "unexpected trailing JSON", http.StatusBadRequest)
+	if err := decoder.Decode(&extra); err != io.EOF {
+		http.Error(
+			w,
+			"unexpected trailing JSON",
+			http.StatusBadRequest,
+		)
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		http.Error(
+			w,
+			"Idempotency-Key header is required",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(
+		r.Context(),
+		5*time.Second,
+	)
 	defer cancel()
 
-	// Temporary demo merchant.
-	// Later, we'll get this from authenticated merchant identity.
-	order, err := h.Service.CreateOrder(
+	order, created, err := h.Service.CreateOrder(
 		ctx,
 		"demo-merchant",
 		req.Amount,
 		req.Currency,
+		key,
 	)
 
 	if err != nil {
 		switch {
 		case errors.Is(err, payment.ErrInvalidAmount),
-			errors.Is(err, payment.ErrUnsupportedCurrency):
+			errors.Is(err, payment.ErrUnsupportedCurrency),
+			errors.Is(err, payment.ErrMissingIdempotencyKey):
 			http.Error(w, err.Error(), http.StatusBadRequest)
+
+		case errors.Is(err, store.ErrIdempotencyConflict):
+			http.Error(
+				w,
+				err.Error(),
+				http.StatusConflict,
+			)
+
 		default:
 			log.Printf("create order failed: %v", err)
 			http.Error(
@@ -82,7 +108,12 @@ func (h *OrderHandler) CreateOrder(
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+
+	if created {
+		w.WriteHeader(http.StatusCreated)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 
 	if err := json.NewEncoder(w).Encode(order); err != nil {
 		log.Printf("encode order response: %v", err)

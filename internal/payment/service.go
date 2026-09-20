@@ -3,6 +3,9 @@ package payment
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 
@@ -12,6 +15,10 @@ import (
 var ErrInvalidAmount = errors.New("amount must be positive")
 
 var ErrUnsupportedCurrency = errors.New("unsupported currency")
+
+var ErrMissingIdempotencyKey = errors.New(
+	"Idempotency-Key header is required",
+)
 
 type OrderService struct {
 	Repo *store.OrderRepository
@@ -24,7 +31,6 @@ func newID() (string, error) {
 		return "", err
 	}
 
-	// Set UUID version 4 and variant bits.
 	b[6] = (b[6] & 0x0f) | 0x40
 	b[8] = (b[8] & 0x3f) | 0x80
 
@@ -38,23 +44,58 @@ func newID() (string, error) {
 	), nil
 }
 
+func hashRequest(amount int64, currency string) (string, error) {
+	normalized := struct {
+		Amount   int64  `json:"amount"`
+		Currency string `json:"currency"`
+	}{
+		Amount:   amount,
+		Currency: currency,
+	}
+
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+
+	sum := sha256.Sum256(data)
+
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func (s *OrderService) CreateOrder(
 	ctx context.Context,
 	merchantID string,
 	amount int64,
 	currency string,
-) (store.Order, error) {
+	key string,
+) (store.Order, bool, error) {
 	if amount <= 0 {
-		return store.Order{}, ErrInvalidAmount
+		return store.Order{}, false, ErrInvalidAmount
 	}
 
 	if currency != "INR" {
-		return store.Order{}, ErrUnsupportedCurrency
+		return store.Order{}, false, ErrUnsupportedCurrency
+	}
+
+	if key == "" {
+		return store.Order{}, false, ErrMissingIdempotencyKey
+	}
+
+	if len(key) > 255 {
+		return store.Order{}, false, errors.New(
+			"Idempotency-Key is too long",
+		)
+	}
+
+	requestHash, err := hashRequest(amount, currency)
+	if err != nil {
+		return store.Order{}, false, err
 	}
 
 	id, err := newID()
 	if err != nil {
-		return store.Order{}, err
+		return store.Order{}, false, err
 	}
 
 	order := store.Order{
@@ -65,9 +106,10 @@ func (s *OrderService) CreateOrder(
 		Status:     "CREATED",
 	}
 
-	if err := s.Repo.Create(ctx, order); err != nil {
-		return store.Order{}, err
-	}
-
-	return order, nil
+	return s.Repo.CreateIdempotent(
+		ctx,
+		order,
+		key,
+		requestHash,
+	)
 }

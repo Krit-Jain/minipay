@@ -512,3 +512,80 @@ func TestRelayFailsDeactivatedEndpoint(t *testing.T) {
 		t.Fatalf("delivery status = %q, want FAILED", status)
 	}
 }
+
+func TestListEvents(t *testing.T) {
+	pool := testPool(t)
+	repo := &OrderRepository{DB: pool}
+	ctx := context.Background()
+	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
+
+	for _, key := range []string{"ev-order-a", "ev-order-b"} {
+		if _, _, err := repo.CreateIdempotent(ctx, Order{
+			ID:         testUUID(t),
+			MerchantID: merchant,
+			Amount:     1000,
+			Currency:   "INR",
+			Status:     "CREATED",
+		}, key, "ehash-"+key); err != nil {
+			t.Fatalf("seed order: %v", err)
+		}
+	}
+
+	all, more, err := repo.ListEvents(ctx, merchant, 20, "", "")
+	if err != nil {
+		t.Fatalf("list events: %v", err)
+	}
+
+	if len(all) != 2 || more {
+		t.Fatalf("events: got %d more=%v, want 2 false", len(all), more)
+	}
+
+	if all[0].Type != EventOrderCreated || all[0].Payload == nil {
+		t.Fatalf("event shape: %+v", all[0])
+	}
+
+	filtered, _, err := repo.ListEvents(ctx, merchant, 20, "", EventOrderCreated)
+	if err != nil {
+		t.Fatalf("filtered list: %v", err)
+	}
+
+	if len(filtered) != 2 {
+		t.Fatalf("filtered: got %d, want 2", len(filtered))
+	}
+
+	none, _, err := repo.ListEvents(ctx, merchant, 20, "", EventPaymentCaptured)
+	if err != nil {
+		t.Fatalf("empty filter: %v", err)
+	}
+
+	if len(none) != 0 {
+		t.Fatalf("empty filter: got %d, want 0", len(none))
+	}
+
+	paged, more, err := repo.ListEvents(ctx, merchant, 1, "", "")
+	if err != nil {
+		t.Fatalf("page 1: %v", err)
+	}
+
+	if len(paged) != 1 || !more {
+		t.Fatalf("page 1: got %d more=%v, want 1 true", len(paged), more)
+	}
+
+	page2, more2, err := repo.ListEvents(ctx, merchant, 1, paged[0].ID, "")
+	if err != nil {
+		t.Fatalf("page 2: %v", err)
+	}
+
+	if len(page2) != 1 || more2 || page2[0].ID == paged[0].ID {
+		t.Fatalf("page 2: unexpected %+v more=%v", page2, more2)
+	}
+
+	if _, _, err := repo.ListEvents(ctx, merchant, 20, "", "order.shipped"); !errors.Is(err, ErrInvalidEventType) {
+		t.Fatalf("bad type: got %v, want ErrInvalidEventType", err)
+	}
+
+	if _, _, err := repo.ListEvents(ctx, merchant, 20, testUUID(t), ""); !errors.Is(err, ErrInvalidCursor) {
+		t.Fatalf("bad cursor: got %v, want ErrInvalidCursor", err)
+	}
+}

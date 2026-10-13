@@ -33,6 +33,8 @@ var ErrEndpointNotFound = errors.New("webhook endpoint not found")
 
 var ErrInvalidEndpointURL = errors.New("endpoint URL must be http(s)")
 
+// Endpoint is a merchant's webhook delivery target. Secret is omitempty:
+// creation returns it once, listings never select it.
 type Endpoint struct {
 	ID         string    `json:"id"`
 	MerchantID string    `json:"merchant_id,omitempty"`
@@ -468,4 +470,171 @@ func newSecret() (string, error) {
 	}
 
 	return "whsec_" + id[:8] + id[9:13] + id[14:18], nil
+}
+
+// Event is one row of the outbox and therefore of the audit trail: every
+// money mutation wrote exactly one, atomically with itself. Refs are empty
+// unless the event concerns that entity.
+type Event struct {
+	ID         string          `json:"id"`
+	MerchantID string          `json:"merchant_id,omitempty"`
+	Type       string          `json:"type"`
+	OrderID    string          `json:"order_id,omitempty"`
+	PaymentID  string          `json:"payment_id,omitempty"`
+	RefundID   string          `json:"refund_id,omitempty"`
+	DisputeID  string          `json:"dispute_id,omitempty"`
+	Payload    json.RawMessage `json:"payload"`
+	CreatedAt  time.Time       `json:"created_at"`
+}
+
+var ErrInvalidEventType = errors.New("unknown event type")
+
+// EventTypes is the closed set the ?type= filter accepts.
+var EventTypes = map[string]bool{
+	EventOrderCreated:      true,
+	EventPaymentAuthorized: true,
+	EventPaymentFailed:     true,
+	EventPaymentCaptured:   true,
+	EventPaymentVoided:     true,
+	EventRefundCreated:     true,
+	EventDisputeOpened:     true,
+	EventDisputeWon:        true,
+	EventDisputeLost:       true,
+}
+
+// ListEvents returns the merchant's outbox (its audit trail), newest first,
+// optionally filtered by type, with the same keyset paging as every other
+// list endpoint.
+func (r *OrderRepository) ListEvents(
+	ctx context.Context,
+	merchantID string,
+	limit int,
+	cursor string,
+	eventType string,
+) ([]Event, bool, error) {
+	if eventType != "" && !EventTypes[eventType] {
+		return nil, false, ErrInvalidEventType
+	}
+
+	const columns = `
+		SELECT id::text, merchant_id, type,
+		       COALESCE(order_id::text, ''), COALESCE(payment_id::text, ''),
+		       COALESCE(refund_id::text, ''), COALESCE(dispute_id::text, ''),
+		       payload::text, created_at
+		FROM events
+		WHERE merchant_id = $1
+	`
+
+	scan := func(rows pgx.Rows) ([]Event, error) {
+		events := make([]Event, 0, limit+1)
+
+		for rows.Next() {
+			var (
+				event   Event
+				payload string
+			)
+
+			if err := rows.Scan(
+				&event.ID,
+				&event.MerchantID,
+				&event.Type,
+				&event.OrderID,
+				&event.PaymentID,
+				&event.RefundID,
+				&event.DisputeID,
+				&payload,
+				&event.CreatedAt,
+			); err != nil {
+				return nil, err
+			}
+
+			event.Payload = json.RawMessage(payload)
+			events = append(events, event)
+		}
+
+		return events, rows.Err()
+	}
+
+	if cursor == "" {
+		var (
+			rows pgx.Rows
+			err  error
+		)
+
+		if eventType == "" {
+			rows, err = r.DB.Query(ctx, columns+`
+				ORDER BY created_at DESC, id DESC
+				LIMIT $2
+			`, merchantID, limit+1)
+		} else {
+			rows, err = r.DB.Query(ctx, columns+`
+				  AND type = $2
+				ORDER BY created_at DESC, id DESC
+				LIMIT $3
+			`, merchantID, eventType, limit+1)
+		}
+
+		if err != nil {
+			return nil, false, err
+		}
+		defer rows.Close()
+
+		events, err := scan(rows)
+		if err != nil {
+			return nil, false, err
+		}
+
+		page, more := pageHasMore(events, limit)
+
+		return page, more, nil
+	}
+
+	var anchor struct {
+		createdAt time.Time
+		id        string
+	}
+
+	err := r.DB.QueryRow(ctx, `
+		SELECT created_at, id::text FROM events
+		WHERE id = $1 AND merchant_id = $2
+	`, cursor, merchantID).Scan(&anchor.createdAt, &anchor.id)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, ErrInvalidCursor
+	}
+
+	if err != nil {
+		return nil, false, err
+	}
+
+	var rows pgx.Rows
+
+	if eventType == "" {
+		rows, err = r.DB.Query(ctx, columns+`
+			  AND (created_at, id) < ($2, $3::uuid)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $4
+		`, merchantID, anchor.createdAt, anchor.id, limit+1)
+	} else {
+		rows, err = r.DB.Query(ctx, columns+`
+			  AND type = $2
+			  AND (created_at, id) < ($3, $4::uuid)
+			ORDER BY created_at DESC, id DESC
+			LIMIT $5
+		`, merchantID, eventType, anchor.createdAt, anchor.id, limit+1)
+	}
+
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	events, err := scan(rows)
+	if err != nil {
+		return nil, false, err
+	}
+
+	page, more := pageHasMore(events, limit)
+
+	return page, more, nil
 }

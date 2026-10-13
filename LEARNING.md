@@ -305,6 +305,46 @@ coat-check holds back to the rack (orders to `CREATED`) and shreds claim tickets
 (key GC). The exhibits themselves (money rows) are never touched; shredding a claim ticket just means the
 next visitor with that number starts a fresh visit.
 
+## 17. Observability and proof — instruments, audit, and load
+
+**Definitions:** *RED* = Rate (requests/sec), Errors (5xx fraction), Duration (latency percentiles) —
+the three signals that tell you a service is healthy. *Cardinality* = how many distinct label
+combinations a metric has; each combination is a stored time series. *Audit trail* = the tamper-evident
+record of who-did-what, used for reconciliation and incident forensics.
+
+**Why route patterns, never paths, in labels:** a series per raw path means a series per order id —
+millions of series from normal traffic, which melts Prometheus (each series costs memory forever).
+Labels must come from *fixed sets*: HTTP method, matched route pattern, status code. Unmatched junk
+shares one `unmatched` series. That single rule is the difference between a dashboard and an outage
+caused by your own monitoring.
+
+**Why histograms, not averages:** an average hides the tail — "200ms average" is compatible with 1%
+of customers waiting 10 seconds. Fixed buckets (5ms…5s) record a distribution, so p50/p99 are
+computable forever after, at constant storage cost per series.
+
+**Why business counters count first-completions only:** a retried order create must not look like two
+orders on the dashboard, or every alert and every revenue graph double-counts during network blips.
+The `created` flag from the idempotent writes is exactly the signal — instrumentation reuses the
+correctness primitive instead of inventing a parallel one.
+
+**Why the outbox doubles as the audit trail:** a separate audit table would need its own writes in every
+transaction (more code, more ways to forget one). The events table already contains every mutation,
+atomically, with merchant, type, refs, full payload, and timestamp — so `GET /v1/events` exposes the
+audit log with zero new writes. The one thing it lacks is per-key actor identity (which key, not just
+which merchant) — noted as future work, and the gap is stated, not hidden.
+
+**Why load proof instead of load hope:** `TestConcurrentSameKeyOrder` (20 goroutines, one key → exactly
+one winner, one row) and `TestConcurrentOverRefund` (10 racers × 10000 on 50000 → exactly five win,
+balance exactly zero) run under `-race` in CI. They assert the ledger stays exact under hostility, not
+just under politeness. The k6 script (`load/k6-race.js`) mirrors the stampede for manual runs against
+real deploys.
+
+**Analogy:** a cockpit. RED is airspeed/altitude/fuel — the three dials that say "flying." Cardinality
+discipline is labeling dials by *type* ("engine 1", "engine 2"), not by serial number of every rivet.
+The audit trail is the flight recorder: it exists because the plane writes it continuously, not because
+someone remembers to take notes during the crash. And load tests are test flights in bad weather —
+you don't certify a plane by flying it once on a calm day.
+
 ## 15. Fees and disputes — how the platform earns, and how it loses
 
 **Definitions:** A *basis point* (bps) is 1/100th of a percent — 200bps = 2%. A *chargeback* (dispute) is

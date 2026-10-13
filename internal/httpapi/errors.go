@@ -27,6 +27,7 @@ const (
 	CodeInvalidEndpointURL    = "invalid_endpoint_url"
 	CodeEndpointNotFound      = "endpoint_not_found"
 	CodeInvalidDispute        = "invalid_dispute"
+	CodeInvalidEventType      = "invalid_event_type"
 	CodeDisputeNotFound       = "dispute_not_found"
 	CodeDisputeNotAllowed     = "dispute_not_allowed"
 	CodeDisputeNotOpen        = "dispute_not_open"
@@ -81,6 +82,9 @@ func statusAndCode(err error) (int, string) {
 
 	case errors.Is(err, store.ErrInvalidDispute):
 		return http.StatusBadRequest, CodeInvalidDispute
+
+	case errors.Is(err, store.ErrInvalidEventType):
+		return http.StatusBadRequest, CodeInvalidEventType
 
 	case errors.Is(err, store.ErrInvalidCursor),
 		errors.Is(err, ErrInvalidPagination):

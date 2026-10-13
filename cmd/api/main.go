@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"minipay/internal/httpapi"
+	"minipay/internal/metrics"
 	"minipay/internal/payment"
 	"minipay/internal/store"
 )
@@ -98,16 +99,21 @@ func main() {
 		Repo: orderRepo,
 	}
 
+	reg := metrics.NewRegistry()
+
 	orderHandler := &httpapi.OrderHandler{
 		Service: orderService,
+		Metrics: reg,
 	}
 
 	refundHandler := &httpapi.RefundHandler{
 		Service: orderService,
+		Metrics: reg,
 	}
 
 	paymentHandler := &httpapi.PaymentHandler{
 		Service: orderService,
+		Metrics: reg,
 	}
 
 	webhookHandler := &httpapi.WebhookHandler{
@@ -116,6 +122,7 @@ func main() {
 
 	disputeHandler := &httpapi.DisputeHandler{
 		Service: orderService,
+		Metrics: reg,
 	}
 
 	api := http.NewServeMux()
@@ -133,6 +140,7 @@ func main() {
 	api.HandleFunc("POST /v1/webhook_endpoints", webhookHandler.CreateEndpoint)
 	api.HandleFunc("GET /v1/webhook_endpoints", webhookHandler.ListEndpoints)
 	api.HandleFunc("DELETE /v1/webhook_endpoints/{id}", webhookHandler.DeleteEndpoint)
+	api.HandleFunc("GET /v1/events", webhookHandler.ListEvents)
 	api.HandleFunc("POST /v1/payments/{id}/disputes", disputeHandler.CreateDispute)
 	api.HandleFunc("POST /v1/disputes/{id}/resolve", disputeHandler.ResolveDispute)
 	api.HandleFunc("GET /v1/disputes", disputeHandler.ListDisputes)
@@ -152,7 +160,7 @@ func main() {
 			func(r *http.Request) string {
 				return httpapi.MerchantFromContext(r.Context())
 			},
-		)(api),
+		)(reg.Middleware(api)),
 	)
 
 	root := http.NewServeMux()
@@ -160,6 +168,7 @@ func main() {
 	// Probes stay public: orchestrators cannot present API keys.
 	root.HandleFunc("GET /healthz", httpapi.Healthz)
 	root.HandleFunc("GET /readyz", httpapi.Readyz(db))
+	root.Handle("GET /metrics", reg.Handler())
 	root.Handle(
 		"/",
 		httpapi.RequestIDMiddleware(
@@ -190,7 +199,7 @@ func main() {
 	// them. It stops before the server starts draining, so in-flight HTTP
 	// keeps its full shutdown budget.
 	relayCtx, relayStop := context.WithCancel(context.Background())
-	go runRelay(relayCtx, orderRepo)
+	go runRelay(relayCtx, orderRepo, reg)
 
 	// The janitor owns time-based maintenance both workers share one
 	// shutdown: holds expire and keys are collected while anyone is alive,
@@ -227,7 +236,7 @@ func main() {
 	slog.Info("server stopped")
 }
 
-func runRelay(ctx context.Context, repo *store.OrderRepository) {
+func runRelay(ctx context.Context, repo *store.OrderRepository, reg *metrics.Registry) {
 	client := &http.Client{Timeout: 5 * time.Second}
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -241,6 +250,7 @@ func runRelay(ctx context.Context, repo *store.OrderRepository) {
 			if err != nil {
 				slog.Error("webhook relay failed", "err", err)
 			} else if settled > 0 {
+				reg.AddWebhookSettled(settled)
 				slog.Info("webhook relay settled deliveries", "count", settled)
 			}
 		}

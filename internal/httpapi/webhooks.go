@@ -131,3 +131,40 @@ func (h *WebhookHandler) DeleteEndpoint(
 
 	w.WriteHeader(http.StatusNoContent)
 }
+
+func (h *WebhookHandler) ListEvents(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	limit, cursor, err := ParsePagination(r)
+	if err != nil {
+		WriteError(w, r, http.StatusBadRequest, CodeInvalidCursor, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(
+		r.Context(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	events, hasMore, err := h.Service.ListEvents(
+		ctx,
+		MerchantFromContext(r.Context()),
+		cursor,
+		limit,
+		r.URL.Query().Get("type"),
+	)
+
+	if err != nil {
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
+			slog.Error("list events failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
+		}
+
+		WriteErrorFor(w, r, err)
+		return
+	}
+
+	writeList(w, r, events, hasMore)
+}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"minipay/internal/metrics"
 	"minipay/internal/payment"
 	"net/http"
 	"time"
@@ -21,6 +22,7 @@ type ResolveDisputeRequest struct {
 
 type DisputeHandler struct {
 	Service *payment.OrderService
+	Metrics *metrics.Registry
 }
 
 func (h *DisputeHandler) CreateDispute(
@@ -80,6 +82,10 @@ func (h *DisputeHandler) CreateDispute(
 
 	if created {
 		w.WriteHeader(http.StatusCreated)
+
+		if h.Metrics != nil {
+			h.Metrics.IncDisputesOpened()
+		}
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}

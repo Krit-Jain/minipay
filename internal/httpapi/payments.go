@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"minipay/internal/metrics"
 	"minipay/internal/payment"
 	"minipay/internal/store"
 	"net/http"
@@ -21,6 +22,7 @@ type CreatePaymentRequest struct {
 
 type PaymentHandler struct {
 	Service *payment.OrderService
+	Metrics *metrics.Registry
 }
 
 func (h *PaymentHandler) CreatePayment(
@@ -101,6 +103,10 @@ func (h *PaymentHandler) CreatePayment(
 
 	if created {
 		w.WriteHeader(http.StatusCreated)
+
+		if h.Metrics != nil {
+			h.Metrics.IncPaymentsCreated(pay.Status)
+		}
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}

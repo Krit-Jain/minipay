@@ -87,6 +87,8 @@ All endpoints require `Authorization: Bearer <key>` except the probes. All money
 | `GET /v1/disputes` | List disputes (paginated) | `200` |
 | `GET /v1/disputes/{id}` | Fetch one dispute | `200` |
 | `GET /v1/balance` | Net receivable per currency | `200` |
+| `GET /v1/events` | Audit trail: outbox events, filterable by `?type=` | `200` |
+| `GET /metrics` | Prometheus exposition (public) | `200` |
 | `POST /v1/webhook_endpoints` | Register a delivery URL `{url}` (secret shown once) | `201` |
 | `GET /v1/webhook_endpoints` | List endpoints (secrets never listed) | `200` |
 | `DELETE /v1/webhook_endpoints/{id}` | Deactivate an endpoint | `204` |
@@ -158,7 +160,7 @@ Every error shares one shape, so clients can switch on `code` and quote `request
 
 | Status | Codes |
 |---|---|
-| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `unsupported_payment_method`, `invalid_payment_details`, `invalid_endpoint_url`, `invalid_dispute`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
+| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `unsupported_payment_method`, `invalid_payment_details`, `invalid_endpoint_url`, `invalid_dispute`, `invalid_event_type`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
 | `401` | `unauthorized` (missing, unknown, or revoked key) |
 | `404` | `order_not_found`, `payment_not_found`, `endpoint_not_found`, `dispute_not_found` (foreign tenants' records read as `404`) |
 | `409` | `idempotency_conflict`, `order_already_paid`, `refund_not_allowed`, `payment_not_capturable`, `payment_not_voidable`, `dispute_not_allowed`, `dispute_not_open` |
@@ -211,6 +213,18 @@ Delivery guarantees, honestly stated:
 - **Replay-safe emission.** Idempotent replays never emit twice — only first completion does.
 - **Shared work.** The relay claims with `FOR UPDATE SKIP LOCKED`, so any number of API
   replicas split the queue instead of double-sending.
+
+### Audit trail
+
+The outbox *is* the audit log: every mutation wrote exactly one event, atomically with
+itself. Read it back, filterable by type:
+
+```bash
+curl -H "Authorization: Bearer $KEY" 'localhost:8080/v1/events?type=payment.captured'
+```
+
+Money rows are append-mostly (statuses flip forward, records are never deleted — only
+idempotency linkage rows are garbage-collected), so the trail reconstructs any state.
 
 ```mermaid
 sequenceDiagram
@@ -305,6 +319,10 @@ reservation. See [LEARNING.md](LEARNING.md) §6 for the full story.
 
 - **Shutdown:** `SIGINT`/`SIGTERM` drains in-flight requests up to 10s.
 - **Logs:** JSON on stdout; every line and every response carries `X-Request-ID`.
+- **Metrics:** `GET /metrics` exposes Prometheus RED (rate/errors/duration by route
+  pattern — never raw paths, so IDs can't explode cardinality) plus first-completion
+  business counters (orders/payments/refunds/disputes created, webhook deliveries
+  settled). Point Prometheus at it; alert on 5xx rate and p99 latency.
 - **Timeouts:** 5s header / 10s read+write / 60s idle; 5s per-request DB contexts.
 - **Boot:** missing `DATABASE_URL` or an invalid `PORT` / duration fails fast with a clear
   error instead of a broken server.
@@ -348,10 +366,12 @@ go test ./...                   # unit (no DB) + integration (skips without DATA
 DATABASE_URL=... go test ./internal/store/ -v   # DB-backed guarantee tests
 ```
 
-Three layers: **unit** (validation, hashing, limiter math, middleware, envelope shape),
-**integration** (replay/conflict/orphan-adoption/over-refund/cross-tenant invisibility against real
-Postgres), and **E2E smoke** (live server: status codes, envelope codes, paging walks, limiter trip
-counts — fixtures deleted and verified gone afterwards).
+Three layers: **unit** (validation, hashing, limiter math, middleware, envelope shape,
+metrics exposition), **integration** (replay/conflict/orphan-adoption/over-refund/cross-tenant
+invisibility against real Postgres), **concurrency proof** (`-race` stampedes asserting
+exactly-once), and **E2E smoke** (live server: status codes, envelope codes, paging walks,
+limiter trip counts — fixtures deleted and verified gone afterwards). A k6 script
+(`load/k6-race.js`) mirrors the stampede for manual runs.
 
 ---
 
@@ -370,6 +390,19 @@ Amounts are integer minor units (paise/cents) — never floats. IDs are app-gene
 Request fingerprints are SHA256. API secrets are stored as hashes only.
 
 ---
+
+## Security posture
+
+- Secrets at rest: API keys stored as SHA256 hashes only; webhook secrets retrievable
+  (signing requires them) and flagged for KMS envelope encryption in production.
+- Card data: only last-4 digits persist; full PANs never reach the database.
+- Tenancy: every read and write scoped to the authenticated merchant; foreign ids
+  read as `404`, foreign writes fail closed.
+- Transport: terminate TLS at the load balancer; the app speaks plain HTTP behind it.
+- Rotation without downtime: `revoke` (or delete endpoint) then issue anew; overlapping
+  validity is the caller's choice during the switch.
+- Blast radius: per-IP + per-merchant rate limits, 1MB bodies, strict JSON, timeouts
+  on every hop, least-privilege DB role recommended in production.
 
 ## Known limitations
 

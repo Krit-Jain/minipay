@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"minipay/internal/metrics"
 	"minipay/internal/payment"
 )
 
@@ -17,6 +18,7 @@ type CreateRefundRequest struct {
 
 type RefundHandler struct {
 	Service *payment.OrderService
+	Metrics *metrics.Registry
 }
 
 func (h *RefundHandler) CreateRefund(
@@ -102,6 +104,10 @@ func (h *RefundHandler) CreateRefund(
 
 	if created {
 		w.WriteHeader(http.StatusCreated)
+
+		if h.Metrics != nil {
+			h.Metrics.IncRefundsCreated()
+		}
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}

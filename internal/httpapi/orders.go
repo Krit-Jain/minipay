@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"minipay/internal/metrics"
 	"minipay/internal/payment"
 	"net/http"
 	"time"
@@ -17,6 +18,7 @@ type CreateOrderRequest struct {
 
 type OrderHandler struct {
 	Service *payment.OrderService
+	Metrics *metrics.Registry
 }
 
 func (h *OrderHandler) CreateOrder(
@@ -89,6 +91,10 @@ func (h *OrderHandler) CreateOrder(
 
 	if created {
 		w.WriteHeader(http.StatusCreated)
+
+		if h.Metrics != nil {
+			h.Metrics.IncOrdersCreated()
+		}
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}

@@ -703,3 +703,17 @@ func (s *OrderService) GetBalance(
 ) ([]store.CurrencyNet, error) {
 	return s.Repo.MerchantBalance(ctx, merchantID)
 }
+
+func (s *OrderService) ListEvents(
+	ctx context.Context,
+	merchantID string,
+	cursor string,
+	limit int,
+	eventType string,
+) ([]store.Event, bool, error) {
+	if cursor != "" && !isValidUUID(cursor) {
+		return nil, false, store.ErrInvalidCursor
+	}
+
+	return s.Repo.ListEvents(ctx, merchantID, limit, cursor, eventType)
+}

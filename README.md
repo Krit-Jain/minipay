@@ -3,6 +3,9 @@
 Minimal payments backend in Go (tiny Stripe/Razorpay clone).
 Stdlib `net/http` + Postgres via `pgxpool`. No web framework.
 
+New here? Start with [LEARNING.md](LEARNING.md) — the full guide to what
+was built, why each piece exists, and the concepts behind it.
+
 ## Layout
 
 | Path | Responsibility |

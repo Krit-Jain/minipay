@@ -85,8 +85,10 @@ func (h *OrderHandler) CreateOrder(
 	if err != nil {
 		switch {
 		case errors.Is(err, payment.ErrInvalidAmount),
+			errors.Is(err, payment.ErrAmountTooLarge),
 			errors.Is(err, payment.ErrUnsupportedCurrency),
-			errors.Is(err, payment.ErrMissingIdempotencyKey):
+			errors.Is(err, payment.ErrMissingIdempotencyKey),
+			errors.Is(err, payment.ErrIdempotencyKeyTooLong):
 			http.Error(w, err.Error(), http.StatusBadRequest)
 
 		case errors.Is(err, store.ErrIdempotencyConflict):

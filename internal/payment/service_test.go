@@ -3,6 +3,7 @@ package payment
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -33,6 +34,51 @@ func TestRefundPaymentValidation(t *testing.T) {
 
 	if _, err := s.RefundPayment(ctx, "some-id", 0); !errors.Is(err, ErrInvalidAmount) {
 		t.Fatalf("zero refund: got %v, want ErrInvalidAmount", err)
+	}
+}
+
+func TestCreateOrderKeyTooLong(t *testing.T) {
+	s := &OrderService{Repo: nil}
+	ctx := context.Background()
+
+	longKey := strings.Repeat("k", 256)
+
+	if _, _, err := s.CreateOrder(ctx, "m1", 100, "INR", longKey); !errors.Is(err, ErrIdempotencyKeyTooLong) {
+		t.Fatalf("256-char key: got %v, want ErrIdempotencyKeyTooLong", err)
+	}
+}
+
+func TestCreateOrderAmountTooLarge(t *testing.T) {
+	s := &OrderService{Repo: nil}
+	ctx := context.Background()
+
+	if _, _, err := s.CreateOrder(ctx, "m1", MaxAmount+1, "INR", "k1"); !errors.Is(err, ErrAmountTooLarge) {
+		t.Fatalf("oversize amount: got %v, want ErrAmountTooLarge", err)
+	}
+}
+
+func TestRefundInvalidPaymentID(t *testing.T) {
+	s := &OrderService{Repo: nil}
+	ctx := context.Background()
+
+	for _, bad := range []string{"", "not-a-uuid", "123", "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"} {
+		if _, err := s.RefundPayment(ctx, bad, 100); !errors.Is(err, ErrInvalidPaymentID) {
+			t.Fatalf("payment ID %q: got %v, want ErrInvalidPaymentID", bad, err)
+		}
+	}
+}
+
+func TestRefundAmountTooLarge(t *testing.T) {
+	s := &OrderService{Repo: nil}
+	ctx := context.Background()
+
+	validID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := s.RefundPayment(ctx, validID, MaxAmount+1); !errors.Is(err, ErrAmountTooLarge) {
+		t.Fatalf("oversize refund: got %v, want ErrAmountTooLarge", err)
 	}
 }
 

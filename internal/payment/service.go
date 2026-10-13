@@ -14,11 +14,52 @@ import (
 
 var ErrInvalidAmount = errors.New("amount must be positive")
 
+var ErrAmountTooLarge = errors.New("amount exceeds maximum allowed")
+
 var ErrUnsupportedCurrency = errors.New("unsupported currency")
 
 var ErrMissingIdempotencyKey = errors.New(
 	"Idempotency-Key header is required",
 )
+
+var ErrIdempotencyKeyTooLong = errors.New("Idempotency-Key is too long")
+
+var ErrInvalidPaymentID = errors.New("invalid payment ID")
+
+// MaxAmount caps order/refund amounts (minor units, paise for INR).
+// 1_000_000_000 paise = Rs 1 crore. It guards against absurd inputs and
+// keeps refunded_amount + amount far from int64 overflow.
+const MaxAmount = 1_000_000_000
+
+// isValidUUID reports whether s has the 8-4-4-4-12 hex shape the app
+// generates (see newID) and the payments/refunds tables store as UUID.
+// It lets the service reject malformed IDs with 400 before Postgres
+// would fail the cast with a 500.
+func isValidUUID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+
+	for i := 0; i < 36; i++ {
+		c := s[i]
+
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			isHex := c >= '0' && c <= '9' ||
+				c >= 'a' && c <= 'f' ||
+				c >= 'A' && c <= 'F'
+			if !isHex {
+				return false
+			}
+		}
+	}
+
+	return true
+}
 
 type OrderService struct {
 	Repo *store.OrderRepository
@@ -74,6 +115,10 @@ func (s *OrderService) CreateOrder(
 		return store.Order{}, false, ErrInvalidAmount
 	}
 
+	if amount > MaxAmount {
+		return store.Order{}, false, ErrAmountTooLarge
+	}
+
 	if currency != "INR" {
 		return store.Order{}, false, ErrUnsupportedCurrency
 	}
@@ -83,9 +128,7 @@ func (s *OrderService) CreateOrder(
 	}
 
 	if len(key) > 255 {
-		return store.Order{}, false, errors.New(
-			"Idempotency-Key is too long",
-		)
+		return store.Order{}, false, ErrIdempotencyKeyTooLong
 	}
 
 	requestHash, err := hashRequest(amount, currency)
@@ -121,6 +164,14 @@ func (s *OrderService) RefundPayment(
 ) (store.Refund, error) {
 	if amount <= 0 {
 		return store.Refund{}, ErrInvalidAmount
+	}
+
+	if amount > MaxAmount {
+		return store.Refund{}, ErrAmountTooLarge
+	}
+
+	if !isValidUUID(paymentID) {
+		return store.Refund{}, ErrInvalidPaymentID
 	}
 
 	id, err := newID()

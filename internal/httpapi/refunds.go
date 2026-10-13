@@ -104,7 +104,9 @@ func (h *RefundHandler) CreateRefund(
 
 	if err != nil {
 		switch {
-		case errors.Is(err, payment.ErrInvalidAmount):
+		case errors.Is(err, payment.ErrInvalidAmount),
+			errors.Is(err, payment.ErrAmountTooLarge),
+			errors.Is(err, payment.ErrInvalidPaymentID):
 			http.Error(
 				w,
 				err.Error(),

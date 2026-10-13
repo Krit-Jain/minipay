@@ -137,7 +137,8 @@ funds (hotel blocking ₹5,000 on your card at check-in). *Capture* = actually t
 *Void* = release the hold.
 
 **Why split them:** Real money doesn't move instantly — the gap between "customer approved" and "merchant gets
-paid" is where fraud checks, shipping, and cancellations live. MiniPay models it honestly:
+paid" is where fraud checks, shipping, and cancellations live. MiniPay models it honestly, and a background
+janitor auto-voids holds older than `HOLD_TTL` (default 30 minutes) so forgotten holds can't lock orders forever.
 - `POST .../payments` → `AUTHORIZED` (order `CREATED → AUTHORIZED`)
 - `POST .../capture` → both `SUCCEEDED` (only now refundable)
 - `POST .../void` → payment `CANCELLED`, order back to `CREATED` (payable again)
@@ -272,6 +273,37 @@ route reading from it. If he collapses mid-route, the next crier picks up the le
 no announcement is ever invented, none is ever lost, and if two criers walk at once they split the list
 instead of shouting over each other. Householders (merchants) check the wax seal (HMAC) and ignore repeat
 shoutings of the same edict (dedupe by event id).
+
+## 16. Background jobs — the night shift and its single foreman
+
+**Definitions:** A *TTL* (time-to-live) is how long data stays valid. An *advisory lock* is a lock Postgres
+hands out by number (`pg_try_advisory_lock(42001)`) without any table behind it — pure mutex-as-a-service.
+*Election* here means N replicas agreeing that exactly one of them does the sweeping each tick.
+
+**Why a janitor at all:** two things rot without one. Authorization holds lock orders indefinitely if the
+merchant never captures or voids (real gateways expire holds after days; the sandbox default is 30 minutes
+via `HOLD_TTL`). Idempotency-key tables grow forever — every order/payment/refund leaves linkage rows that
+are useless once their replay window closes (`KEY_TTL`, default 24h).
+
+**How it works:** every `JANITOR_INTERVAL` each replica calls `RunJanitor`, which grabs one pooled connection
+(the lock is session-scoped, so it must not wander across pooled connections) and tries the advisory lock.
+Losers return immediately — no work, no waiting. The winner expires holds (one `UPDATE ... RETURNING` batch,
+capped at 100 rows per tick so a long outage drains gradually, each emitting `payment.voided` exactly like a
+merchant void) and deletes stale keys from all three key tables. Concurrency with live traffic is safe by
+construction: a capture racing the sweeper serializes on the payment row lock, and whoever commits first
+wins while the loser sees the settled state.
+
+**What the janitor pointedly does NOT touch:** money rows. Orders, payments, refunds, disputes, and events
+are the audit trail — forever. Only linkage rows are collected, and post-GC semantics stay safe: a retried
+key becomes a fresh claim (a new record, `201`) rather than a false replay or a false `409`. Deleting a
+pointer can never resurrect or duplicate the thing it pointed at — which is exactly why keys and money live
+in separate tables.
+
+**Analogy:** a museum's night shift. Every night exactly one foreman takes the single master key (advisory
+lock) — if two crews showed up they'd trip over each other, so the rest go home. The crew releases expired
+coat-check holds back to the rack (orders to `CREATED`) and shreds claim tickets older than the policy
+(key GC). The exhibits themselves (money rows) are never touched; shredding a claim ticket just means the
+next visitor with that number starts a fresh visit.
 
 ## 15. Fees and disputes — how the platform earns, and how it loses
 

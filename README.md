@@ -297,14 +297,21 @@ reservation. See [LEARNING.md](LEARNING.md) §6 for the full story.
 |---|---|---|
 | Database | `DATABASE_URL` | *required* |
 | Port | `PORT` | `8080` |
+| Hold lifetime | `HOLD_TTL` | `30m` (authorizations older than this are auto-voided) |
+| Key lifetime | `KEY_TTL` | `24h` (settled idempotency keys older than this are deleted) |
+| Janitor tick | `JANITOR_INTERVAL` | `1m` |
 | Merchant budget | — | 120 req/min, burst 30 (shared in Postgres) |
 | IP budget | — | 600 req/min, burst 100 (per instance) |
 
 - **Shutdown:** `SIGINT`/`SIGTERM` drains in-flight requests up to 10s.
 - **Logs:** JSON on stdout; every line and every response carries `X-Request-ID`.
 - **Timeouts:** 5s header / 10s read+write / 60s idle; 5s per-request DB contexts.
-- **Boot:** missing `DATABASE_URL` or an invalid `PORT` fails fast with a clear
+- **Boot:** missing `DATABASE_URL` or an invalid `PORT` / duration fails fast with a clear
   error instead of a broken server.
+- **Janitor:** every tick one replica wins a Postgres advisory lock and sweeps stale
+  authorization holds (order back to `CREATED`, `payment.voided` emitted like a merchant
+  void) plus expired idempotency keys. Money rows are never deleted — only linkage rows,
+  so a retried key after collection starts a fresh claim instead of a false replay.
 
 ## Deploy with Docker
 
@@ -366,7 +373,5 @@ Request fingerprints are SHA256. API secrets are stored as hashes only.
 
 ## Known limitations
 
-1. Authorizations never expire — a hold stays until captured or voided; a
-   background sweeper for stale holds is planned.
-2. One full-amount payment per order — no split/partial payments.
-3. Per-IP rate limits are per instance; only merchant budgets are shared.
+1. One full-amount payment per order — no split/partial payments.
+2. Per-IP rate limits are per instance; only merchant budgets are shared.

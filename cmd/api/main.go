@@ -32,6 +32,22 @@ func resolvePort(raw string) (string, error) {
 	return strconv.Itoa(port), nil
 }
 
+// resolveDuration parses an optional $VAR Go duration ("30m", "24h"): empty
+// means def, anything else must parse and be positive. Used for the janitor
+// knobs so operators tune retention without code changes.
+func resolveDuration(raw string, def string) (time.Duration, error) {
+	if raw == "" {
+		raw = def
+	}
+
+	d, err := time.ParseDuration(raw)
+	if err != nil || d <= 0 {
+		return 0, fmt.Errorf("must be a positive Go duration, got %q", raw)
+	}
+
+	return d, nil
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
@@ -40,6 +56,24 @@ func main() {
 	port, err := resolvePort(os.Getenv("PORT"))
 	if err != nil {
 		slog.Error("invalid PORT", "err", err)
+		os.Exit(1)
+	}
+
+	holdTTL, err := resolveDuration(os.Getenv("HOLD_TTL"), "30m")
+	if err != nil {
+		slog.Error("invalid HOLD_TTL", "err", err)
+		os.Exit(1)
+	}
+
+	keyTTL, err := resolveDuration(os.Getenv("KEY_TTL"), "24h")
+	if err != nil {
+		slog.Error("invalid KEY_TTL", "err", err)
+		os.Exit(1)
+	}
+
+	janitorInterval, err := resolveDuration(os.Getenv("JANITOR_INTERVAL"), "1m")
+	if err != nil {
+		slog.Error("invalid JANITOR_INTERVAL", "err", err)
 		os.Exit(1)
 	}
 
@@ -158,6 +192,12 @@ func main() {
 	relayCtx, relayStop := context.WithCancel(context.Background())
 	go runRelay(relayCtx, orderRepo)
 
+	// The janitor owns time-based maintenance both workers share one
+	// shutdown: holds expire and keys are collected while anyone is alive,
+	// exactly once per tick across replicas (advisory-lock election).
+	janitorCtx, janitorStop := context.WithCancel(context.Background())
+	go runJanitor(janitorCtx, orderRepo, janitorInterval, holdTTL, keyTTL)
+
 	go func() {
 		slog.Info("minipay listening", "addr", server.Addr)
 
@@ -171,6 +211,7 @@ func main() {
 	<-sigCtx.Done()
 	slog.Info("shutdown signal received, draining in-flight requests")
 	relayStop()
+	janitorStop()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(
 		context.Background(),
@@ -201,6 +242,37 @@ func runRelay(ctx context.Context, repo *store.OrderRepository) {
 				slog.Error("webhook relay failed", "err", err)
 			} else if settled > 0 {
 				slog.Info("webhook relay settled deliveries", "count", settled)
+			}
+		}
+	}
+}
+
+func runJanitor(
+	ctx context.Context,
+	repo *store.OrderRepository,
+	interval time.Duration,
+	holdTTL time.Duration,
+	keyTTL time.Duration,
+) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			expired, purged, elected, err := repo.RunJanitor(ctx, holdTTL, keyTTL)
+			switch {
+			case err != nil:
+				slog.Error("janitor failed", "err", err)
+			case !elected:
+				// Another replica is on duty this tick.
+			case expired+purged > 0:
+				slog.Info("janitor swept",
+					"holds_expired", expired,
+					"keys_purged", purged,
+				)
 			}
 		}
 	}

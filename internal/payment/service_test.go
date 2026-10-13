@@ -5,6 +5,8 @@ import (
 	"errors"
 	"strings"
 	"testing"
+
+	"minipay/internal/store"
 )
 
 func TestCreateOrderValidation(t *testing.T) {
@@ -139,8 +141,67 @@ func TestHashRefundRequestDeterministic(t *testing.T) {
 	}
 }
 
-func TestHashRequestDeterministic(t *testing.T) {
-	h1, err := hashRequest(100, "INR")
+func TestCreatePaymentValidation(t *testing.T) {
+	s := &OrderService{Repo: nil} // validation runs before any DB access
+	ctx := context.Background()
+
+	validID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.CreatePayment(ctx, "m1", validID, 0, "k1"); !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("zero amount: got %v, want ErrInvalidAmount", err)
+	}
+
+	if _, _, err := s.CreatePayment(ctx, "m1", validID, MaxAmount+1, "k1"); !errors.Is(err, ErrAmountTooLarge) {
+		t.Fatalf("oversize amount: got %v, want ErrAmountTooLarge", err)
+	}
+
+	if _, _, err := s.CreatePayment(ctx, "m1", "not-a-uuid", 100, "k1"); !errors.Is(err, store.ErrOrderNotFound) {
+		t.Fatalf("bad order ID: got %v, want ErrOrderNotFound", err)
+	}
+
+	if _, _, err := s.CreatePayment(ctx, "m1", validID, 100, ""); !errors.Is(err, ErrMissingIdempotencyKey) {
+		t.Fatalf("empty key: got %v, want ErrMissingIdempotencyKey", err)
+	}
+
+	if _, _, err := s.CreatePayment(ctx, "m1", validID, 100, strings.Repeat("k", 256)); !errors.Is(err, ErrIdempotencyKeyTooLong) {
+		t.Fatalf("256-char key: got %v, want ErrIdempotencyKeyTooLong", err)
+	}
+}
+
+func TestHashPaymentRequestDeterministic(t *testing.T) {
+	orderID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h1, err := hashPaymentRequest(orderID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h2, err := hashPaymentRequest(orderID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if h1 != h2 {
+		t.Fatal("same input must produce same hash")
+	}
+
+	h3, err := hashPaymentRequest(orderID, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if h1 == h3 {
+		t.Fatal("different amount must produce different hash")
+	}
+}
+
+func TestHashRequestDeterministic(t *testing.T) {	h1, err := hashRequest(100, "INR")
 	if err != nil {
 		t.Fatal(err)
 	}

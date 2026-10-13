@@ -25,7 +25,8 @@ func (r *OrderRepository) CreateRefund(
 	paymentID string,
 	refundID string,
 	amount int64,
-) (Refund, error) {	tx, err := r.DB.Begin(ctx)
+) (Refund, error) {
+	tx, err := r.DB.Begin(ctx)
 	if err != nil {
 		return Refund{}, err
 	}

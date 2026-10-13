@@ -25,15 +25,6 @@ func (h *OrderHandler) CreateOrder(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	if r.Method != http.MethodPost {
-		http.Error(
-			w,
-			"method not allowed",
-			http.StatusMethodNotAllowed,
-		)
-		return
-	}
-
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	defer r.Body.Close()
 
@@ -116,6 +107,45 @@ func (h *OrderHandler) CreateOrder(
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
+
+	if err := json.NewEncoder(w).Encode(order); err != nil {
+		log.Printf("encode order response: %v", err)
+	}
+}
+
+func (h *OrderHandler) GetOrder(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	ctx, cancel := context.WithTimeout(
+		r.Context(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	order, err := h.Service.GetOrder(
+		ctx,
+		"demo-merchant",
+		r.PathValue("id"),
+	)
+
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrOrderNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+
+		default:
+			log.Printf("get order failed: %v", err)
+			http.Error(
+				w,
+				"could not fetch order",
+				http.StatusInternalServerError,
+			)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
 
 	if err := json.NewEncoder(w).Encode(order); err != nil {
 		log.Printf("encode order response: %v", err)

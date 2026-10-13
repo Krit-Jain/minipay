@@ -123,6 +123,25 @@ func hashRefundRequest(paymentID string, amount int64) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+func hashPaymentRequest(orderID string, amount int64) (string, error) {
+	normalized := struct {
+		OrderID string `json:"order_id"`
+		Amount  int64  `json:"amount"`
+	}{
+		OrderID: orderID,
+		Amount:  amount,
+	}
+
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+
+	sum := sha256.Sum256(data)
+
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func (s *OrderService) CreateOrder(
 	ctx context.Context,
 	merchantID string,
@@ -222,4 +241,80 @@ func (s *OrderService) RefundPayment(
 		key,
 		requestHash,
 	)
+}
+
+func (s *OrderService) CreatePayment(
+	ctx context.Context,
+	merchantID string,
+	orderID string,
+	amount int64,
+	key string,
+) (store.Payment, bool, error) {
+	if amount <= 0 {
+		return store.Payment{}, false, ErrInvalidAmount
+	}
+
+	if amount > MaxAmount {
+		return store.Payment{}, false, ErrAmountTooLarge
+	}
+
+	if !isValidUUID(orderID) {
+		return store.Payment{}, false, store.ErrOrderNotFound
+	}
+
+	if key == "" {
+		return store.Payment{}, false, ErrMissingIdempotencyKey
+	}
+
+	if len(key) > 255 {
+		return store.Payment{}, false, ErrIdempotencyKeyTooLong
+	}
+
+	requestHash, err := hashPaymentRequest(orderID, amount)
+	if err != nil {
+		return store.Payment{}, false, err
+	}
+
+	id, err := newID()
+	if err != nil {
+		return store.Payment{}, false, err
+	}
+
+	payment := store.Payment{
+		ID:     id,
+		Amount: amount,
+	}
+
+	return s.Repo.CreatePaymentIdempotent(
+		ctx,
+		payment,
+		orderID,
+		merchantID,
+		key,
+		requestHash,
+	)
+}
+
+func (s *OrderService) GetOrder(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) (store.Order, error) {
+	if !isValidUUID(id) {
+		return store.Order{}, store.ErrOrderNotFound
+	}
+
+	return s.Repo.GetOrder(ctx, merchantID, id)
+}
+
+func (s *OrderService) GetPayment(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) (store.Payment, error) {
+	if !isValidUUID(id) {
+		return store.Payment{}, store.ErrPaymentNotFound
+	}
+
+	return s.Repo.GetPayment(ctx, merchantID, id)
 }

@@ -40,11 +40,17 @@ func main() {
 		Service: orderService,
 	}
 
+	paymentHandler := &httpapi.PaymentHandler{
+		Service: orderService,
+	}
+
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/v1/orders", orderHandler.CreateOrder)
-
-	mux.HandleFunc("/v1/payments/", refundHandler.CreateRefund)
+	mux.HandleFunc("POST /v1/orders", orderHandler.CreateOrder)
+	mux.HandleFunc("GET /v1/orders/{id}", orderHandler.GetOrder)
+	mux.HandleFunc("POST /v1/orders/{id}/payments", paymentHandler.CreatePayment)
+	mux.HandleFunc("GET /v1/payments/{id}", paymentHandler.GetPayment)
+	mux.HandleFunc("POST /v1/payments/{id}/refunds", refundHandler.CreateRefund)
 
 	server := &http.Server{
 		Addr:              ":8080",

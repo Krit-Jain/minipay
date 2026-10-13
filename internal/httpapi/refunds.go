@@ -7,7 +7,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strings"
 	"time"
 
 	"minipay/internal/payment"
@@ -26,36 +25,7 @@ func (h *RefundHandler) CreateRefund(
 	w http.ResponseWriter,
 	r *http.Request,
 ) {
-	if r.Method != http.MethodPost {
-		http.Error(
-			w,
-			"method not allowed",
-			http.StatusMethodNotAllowed,
-		)
-		return
-	}
-
-	// Extract the payment ID from the URL.
-	const prefix = "/v1/payments/"
-	const suffix = "/refunds"
-
-	path := strings.TrimPrefix(r.URL.Path, prefix)
-
-	if !strings.HasSuffix(path, suffix) {
-		http.NotFound(w, r)
-		return
-	}
-
-	paymentID := strings.TrimSuffix(path, suffix)
-
-	if paymentID == "" || strings.Contains(paymentID, "/") {
-		http.Error(
-			w,
-			"invalid payment ID",
-			http.StatusBadRequest,
-		)
-		return
-	}
+	paymentID := r.PathValue("id")
 
 	// Decode the request body.
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)

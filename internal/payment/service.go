@@ -18,6 +18,14 @@ var ErrAmountTooLarge = errors.New("amount exceeds maximum allowed")
 
 var ErrUnsupportedCurrency = errors.New("unsupported currency")
 
+// SupportedCurrencies is the ISO allowlist. Amounts are integer minor units
+// per currency (paise for INR, cents for USD) — the set grows by adding a
+// code here plus the matching CHECK in migrations/0006_currencies.sql.
+var SupportedCurrencies = map[string]bool{
+	"INR": true,
+	"USD": true,
+}
+
 var ErrMissingIdempotencyKey = errors.New(
 	"Idempotency-Key header is required",
 )
@@ -157,7 +165,7 @@ func (s *OrderService) CreateOrder(
 		return store.Order{}, false, ErrAmountTooLarge
 	}
 
-	if currency != "INR" {
+	if !SupportedCurrencies[currency] {
 		return store.Order{}, false, ErrUnsupportedCurrency
 	}
 

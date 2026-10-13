@@ -21,8 +21,12 @@ func TestCreateOrderValidation(t *testing.T) {
 		t.Fatalf("negative amount: got %v, want ErrInvalidAmount", err)
 	}
 
-	if _, _, err := s.CreateOrder(ctx, "m1", 100, "USD", "k1"); !errors.Is(err, ErrUnsupportedCurrency) {
-		t.Fatalf("USD: got %v, want ErrUnsupportedCurrency", err)
+	if _, _, err := s.CreateOrder(ctx, "m1", 100, "EUR", "k1"); !errors.Is(err, ErrUnsupportedCurrency) {
+		t.Fatalf("EUR: got %v, want ErrUnsupportedCurrency", err)
+	}
+
+	if _, _, err := s.CreateOrder(ctx, "m1", 100, "usd", "k1"); !errors.Is(err, ErrUnsupportedCurrency) {
+		t.Fatalf("lowercase usd: got %v, want ErrUnsupportedCurrency", err)
 	}
 
 	if _, _, err := s.CreateOrder(ctx, "m1", 100, "INR", ""); !errors.Is(err, ErrMissingIdempotencyKey) {

@@ -11,7 +11,7 @@ test: vet
 
 migrate:
 	@test -n "$(DATABASE_URL)" || (echo "DATABASE_URL is not set" && exit 1)
-	psql "$(DATABASE_URL)" -f migrations/0001_init.sql
+	for f in migrations/*.sql; do psql "$(DATABASE_URL)" -f "$$f" || exit 1; done
 
 run:
 	go run ./cmd/api

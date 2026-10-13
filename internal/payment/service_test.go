@@ -29,11 +29,24 @@ func TestCreateOrderValidation(t *testing.T) {
 }
 
 func TestRefundPaymentValidation(t *testing.T) {
-	s := &OrderService{Repo: nil} // amount check runs before any DB access
+	s := &OrderService{Repo: nil} // validation runs before any DB access
 	ctx := context.Background()
 
-	if _, err := s.RefundPayment(ctx, "some-id", 0); !errors.Is(err, ErrInvalidAmount) {
+	validID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.RefundPayment(ctx, "m1", "some-id", 0, "k1"); !errors.Is(err, ErrInvalidAmount) {
 		t.Fatalf("zero refund: got %v, want ErrInvalidAmount", err)
+	}
+
+	if _, _, err := s.RefundPayment(ctx, "m1", validID, 100, ""); !errors.Is(err, ErrMissingIdempotencyKey) {
+		t.Fatalf("empty key: got %v, want ErrMissingIdempotencyKey", err)
+	}
+
+	if _, _, err := s.RefundPayment(ctx, "m1", validID, 100, strings.Repeat("k", 256)); !errors.Is(err, ErrIdempotencyKeyTooLong) {
+		t.Fatalf("256-char key: got %v, want ErrIdempotencyKeyTooLong", err)
 	}
 }
 
@@ -62,7 +75,7 @@ func TestRefundInvalidPaymentID(t *testing.T) {
 	ctx := context.Background()
 
 	for _, bad := range []string{"", "not-a-uuid", "123", "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"} {
-		if _, err := s.RefundPayment(ctx, bad, 100); !errors.Is(err, ErrInvalidPaymentID) {
+		if _, _, err := s.RefundPayment(ctx, "m1", bad, 100, "k1"); !errors.Is(err, ErrInvalidPaymentID) {
 			t.Fatalf("payment ID %q: got %v, want ErrInvalidPaymentID", bad, err)
 		}
 	}
@@ -77,8 +90,52 @@ func TestRefundAmountTooLarge(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := s.RefundPayment(ctx, validID, MaxAmount+1); !errors.Is(err, ErrAmountTooLarge) {
+	if _, _, err := s.RefundPayment(ctx, "m1", validID, MaxAmount+1, "k1"); !errors.Is(err, ErrAmountTooLarge) {
 		t.Fatalf("oversize refund: got %v, want ErrAmountTooLarge", err)
+	}
+}
+
+func TestHashRefundRequestDeterministic(t *testing.T) {
+	paymentID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h1, err := hashRefundRequest(paymentID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h2, err := hashRefundRequest(paymentID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if h1 != h2 {
+		t.Fatal("same input must produce same hash")
+	}
+
+	h3, err := hashRefundRequest(paymentID, 200)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if h1 == h3 {
+		t.Fatal("different amount must produce different hash")
+	}
+
+	otherID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h4, err := hashRefundRequest(otherID, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if h1 == h4 {
+		t.Fatal("different payment must produce different hash")
 	}
 }
 

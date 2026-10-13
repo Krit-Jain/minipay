@@ -96,24 +96,39 @@ func (h *RefundHandler) CreateRefund(
 	)
 	defer cancel()
 
-	refund, err := h.Service.RefundPayment(
+	key := r.Header.Get("Idempotency-Key")
+	if key == "" {
+		http.Error(
+			w,
+			"Idempotency-Key header is required",
+			http.StatusBadRequest,
+		)
+		return
+	}
+
+	refund, created, err := h.Service.RefundPayment(
 		ctx,
+		"demo-merchant",
 		paymentID,
 		req.Amount,
+		key,
 	)
 
 	if err != nil {
 		switch {
 		case errors.Is(err, payment.ErrInvalidAmount),
 			errors.Is(err, payment.ErrAmountTooLarge),
-			errors.Is(err, payment.ErrInvalidPaymentID):
+			errors.Is(err, payment.ErrInvalidPaymentID),
+			errors.Is(err, payment.ErrMissingIdempotencyKey),
+			errors.Is(err, payment.ErrIdempotencyKeyTooLong):
 			http.Error(
 				w,
 				err.Error(),
 				http.StatusBadRequest,
 			)
 
-		case errors.Is(err, store.ErrRefundNotAllowed):
+		case errors.Is(err, store.ErrRefundNotAllowed),
+			errors.Is(err, store.ErrIdempotencyConflict):
 			http.Error(
 				w,
 				err.Error(),
@@ -132,7 +147,12 @@ func (h *RefundHandler) CreateRefund(
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusCreated)
+
+	if created {
+		w.WriteHeader(http.StatusCreated)
+	} else {
+		w.WriteHeader(http.StatusOK)
+	}
 
 	if err := json.NewEncoder(w).Encode(refund); err != nil {
 		log.Printf("encode refund response: %v", err)

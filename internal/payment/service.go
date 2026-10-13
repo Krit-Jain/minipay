@@ -104,6 +104,25 @@ func hashRequest(amount int64, currency string) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+func hashRefundRequest(paymentID string, amount int64) (string, error) {
+	normalized := struct {
+		PaymentID string `json:"payment_id"`
+		Amount    int64  `json:"amount"`
+	}{
+		PaymentID: paymentID,
+		Amount:    amount,
+	}
+
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return "", err
+	}
+
+	sum := sha256.Sum256(data)
+
+	return hex.EncodeToString(sum[:]), nil
+}
+
 func (s *OrderService) CreateOrder(
 	ctx context.Context,
 	merchantID string,
@@ -159,30 +178,48 @@ func (s *OrderService) CreateOrder(
 
 func (s *OrderService) RefundPayment(
 	ctx context.Context,
+	merchantID string,
 	paymentID string,
 	amount int64,
-) (store.Refund, error) {
+	key string,
+) (store.Refund, bool, error) {
 	if amount <= 0 {
-		return store.Refund{}, ErrInvalidAmount
+		return store.Refund{}, false, ErrInvalidAmount
 	}
 
 	if amount > MaxAmount {
-		return store.Refund{}, ErrAmountTooLarge
+		return store.Refund{}, false, ErrAmountTooLarge
 	}
 
 	if !isValidUUID(paymentID) {
-		return store.Refund{}, ErrInvalidPaymentID
+		return store.Refund{}, false, ErrInvalidPaymentID
+	}
+
+	if key == "" {
+		return store.Refund{}, false, ErrMissingIdempotencyKey
+	}
+
+	if len(key) > 255 {
+		return store.Refund{}, false, ErrIdempotencyKeyTooLong
+	}
+
+	requestHash, err := hashRefundRequest(paymentID, amount)
+	if err != nil {
+		return store.Refund{}, false, err
 	}
 
 	id, err := newID()
 	if err != nil {
-		return store.Refund{}, err
+		return store.Refund{}, false, err
 	}
 
-	return s.Repo.CreateRefund(
+	return s.Repo.CreateRefundIdempotent(
 		ctx,
 		paymentID,
 		id,
 		amount,
+		merchantID,
+		key,
+		requestHash,
 	)
 }

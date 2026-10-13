@@ -99,12 +99,19 @@ func (r *OrderRepository) CreateIdempotent(
 		return existing, false, nil
 	}
 
-	// 5. No order is associated with this key yet.
-	// Create it within this same transaction.
+	// 5. No order is linked to this key yet. That means either a fresh
+	// key, or a previous attempt crashed between inserting the order and
+	// linking the key (orphan). The UNIQUE index on
+	// (merchant_id, idempotency_key) makes this insert safe to replay:
+	// ON CONFLICT means an orphan exists, which we adopt below instead
+	// of inserting a duplicate order.
+	inserted := true
+
 	err = tx.QueryRow(ctx, `
 		INSERT INTO orders
-			(id, merchant_id, amount, currency, status)
-		VALUES ($1, $2, $3, $4, $5)
+			(id, merchant_id, amount, currency, status, idempotency_key)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		ON CONFLICT (merchant_id, idempotency_key) DO NOTHING
 		RETURNING created_at
 	`,
 		order.ID,
@@ -112,7 +119,26 @@ func (r *OrderRepository) CreateIdempotent(
 		order.Amount,
 		order.Currency,
 		order.Status,
+		key,
 	).Scan(&order.CreatedAt)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		inserted = false
+
+		err = tx.QueryRow(ctx, `
+			SELECT id::text, merchant_id, amount,
+			       currency, status, created_at
+			FROM orders
+			WHERE merchant_id = $1 AND idempotency_key = $2
+		`, order.MerchantID, key).Scan(
+			&order.ID,
+			&order.MerchantID,
+			&order.Amount,
+			&order.Currency,
+			&order.Status,
+			&order.CreatedAt,
+		)
+	}
 
 	if err != nil {
 		return Order{}, false, err
@@ -137,7 +163,7 @@ func (r *OrderRepository) CreateIdempotent(
 		return Order{}, false, err
 	}
 
-	return order, true, nil
+	return order, inserted, nil
 }
 
 // Keep this method if other code still uses the old Create API.
@@ -159,6 +185,3 @@ func (r *OrderRepository) Create(
 
 	return err
 }
-
-// Keep this import useful for compile-time reference to pgx.
-var _ = pgx.ErrNoRows

@@ -10,9 +10,10 @@ Stdlib `net/http` + Postgres via `pgxpool`. No web framework.
 | `cmd/api/main.go` | Wiring: DB pool → repo → service → handlers → `ServeMux` on `:8080` |
 | `internal/httpapi/` | HTTP validation, JSON parsing, status-code mapping (`orders.go`, `refunds.go`) |
 | `internal/payment/` | Business rules: amount > 0, `INR` only, `Idempotency-Key` required, UUIDv4 + SHA256 request hash |
-| `internal/store/` | Postgres transactions (`orders.go` idempotent create, `refunds.go` atomic refund) |
-| `migrations/0001_init.sql` | Authoritative schema |
+| `internal/store/` | Postgres transactions (`orders.go` idempotent create, `refunds.go` idempotent atomic refund) |
+| `migrations/` | Authoritative schema, applied in order (`0001_init.sql`, `0002_refund_idempotency.sql`) |
 | `internal/payment/service_test.go` | Unit tests (no DB needed) |
+| `internal/store/store_test.go` | DB integration tests (need `DATABASE_URL`, skip otherwise) |
 
 ## Amounts
 
@@ -42,43 +43,50 @@ order + link key in the same transaction.
 
 ### `POST /v1/payments/{id}/refunds`
 
+Header `Idempotency-Key: <opaque client key>` (required, ≤255 chars).
+Merchant is currently hardcoded to `demo-merchant`, like orders.
+
 ```bash
 curl -X POST localhost:8080/v1/payments/<payment-uuid>/refunds \
   -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: refund-123' \
   -d '{"amount":10000}'
 ```
 
-Responses: `201` created (`PENDING`), `400` bad amount/ID, `409` payment
-missing / not `SUCCEEDED` / insufficient refundable balance, `500` otherwise.
+Responses: `201` created (`PENDING`), `200` idempotent replay (same key +
+same body), `400` bad amount/ID/missing key, `409` same key with different
+body, or payment missing / not `SUCCEEDED` / insufficient refundable
+balance, `500` otherwise.
 
-Anti-over-refund (`store/refunds.go`): single conditional
+Anti-over-refund (`store/refunds.go`): the refund row is inserted first
+with `balance_reserved = false`, then a single conditional
 `UPDATE payments SET refunded_amount += $1 WHERE status='SUCCEEDED' AND ...`
-— losers get zero rows → `409`. Refund row is inserted in the same tx.
+reserves the balance — losers get zero rows → `409`. The `balance_reserved`
+flag plus the `UNIQUE (payment_id, idempotency_key)` index let a replay
+after a mid-refund crash converge without double-reserving or losing the
+reservation. Key, reservation, and record commit in one transaction.
 
 ## Run
 
 ```bash
-cp .env.example .env          # set DATABASE_URL
-psql "$DATABASE_URL" -f migrations/0001_init.sql
+cp .env.example .env          # set DATABASE_URL, then export it in your shell
+make migrate                  # applies migrations/*.sql in order
 go run ./cmd/api
 ```
 
 ## Test
 
 ```bash
-go vet ./...
-go test ./...
+make test                     # vet + full suite (DB tests skip without DATABASE_URL)
+DATABASE_URL=... go test ./internal/store/ -v   # DB integration tests
 ```
 
-DB integration tests (concurrent idempotency / refund races) are planned;
-currently only pure-logic unit tests run without a database.
+Unit tests cover validation, hashing, and UUID shape. Store integration
+tests cover idempotent order replay + conflict + crash-orphan adoption,
+and refund replay + conflict + atomic over-refund rejection.
 
-## Known limitations (being fixed step by step)
+## Known limitations
 
-1. Refunds lack `Idempotency-Key` — retry can double-refund.
-2. Invalid payment UUID surfaces as `500` instead of `400`.
-3. Over-long idempotency key surfaces as `500` instead of `400`.
-4. Crashed key-claim (key with `order_id NULL`) wedges that key.
-5. No `payments` creation API — orders and payments are disconnected.
-6. No auth; single hardcoded merchant; `INR` only.
-7. No graceful shutdown, health checks, rate limiting, or structured logs.
+1. No `payments` creation API — orders and payments are disconnected.
+2. No auth; single hardcoded merchant; `INR` only.
+3. No graceful shutdown, health checks, rate limiting, or structured logs.

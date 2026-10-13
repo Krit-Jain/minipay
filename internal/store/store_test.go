@@ -187,3 +187,162 @@ func TestCreateRefundAtomicity(t *testing.T) {
 		t.Fatalf("unknown payment: got %v, want ErrRefundNotAllowed", err)
 	}
 }
+
+func TestCreateRefundIdempotentReplayAndConflict(t *testing.T) {
+	pool := testPool(t)
+	repo := &OrderRepository{DB: pool}
+	ctx := context.Background()
+	merchant := "test-merchant-" + testUUID(t)[:8]
+	key := "test-refund-key"
+
+	orderID := testUUID(t)
+	paymentID := testUUID(t)
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO orders (id, merchant_id, amount, currency, status)
+		 VALUES ($1, $2, 50000, 'INR', 'CREATED')`,
+		orderID,
+		merchant,
+	); err != nil {
+		t.Fatalf("fixture order: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO payments (id, order_id, amount, currency, status)
+		 VALUES ($1, $2, 50000, 'INR', 'SUCCEEDED')`,
+		paymentID,
+		orderID,
+	); err != nil {
+		t.Fatalf("fixture payment: %v", err)
+	}
+
+	first, created, err := repo.CreateRefundIdempotent(
+		ctx, paymentID, testUUID(t), 10000, merchant, key, "rhash-aaa",
+	)
+	if err != nil {
+		t.Fatalf("initial refund: %v", err)
+	}
+
+	if !created {
+		t.Fatal("initial refund: created = false, want true")
+	}
+
+	// Same key + same hash replays the original refund, no second reserve.
+	replay, created, err := repo.CreateRefundIdempotent(
+		ctx, paymentID, testUUID(t), 10000, merchant, key, "rhash-aaa",
+	)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+
+	if created {
+		t.Fatal("replay: created = true, want false")
+	}
+
+	if replay.ID != first.ID {
+		t.Fatalf("replay: id = %q, want original %q", replay.ID, first.ID)
+	}
+
+	var refundCount, refunded int64
+
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*), (SELECT refunded_amount FROM payments WHERE id = $1)
+		 FROM refunds WHERE payment_id = $1`,
+		paymentID,
+	).Scan(&refundCount, &refunded); err != nil {
+		t.Fatalf("accounting check: %v", err)
+	}
+
+	if refundCount != 1 {
+		t.Fatalf("refund rows = %d, want 1 (replay must not duplicate)", refundCount)
+	}
+
+	if refunded != 10000 {
+		t.Fatalf("refunded_amount = %d, want 10000 (replay must not re-reserve)", refunded)
+	}
+
+	// Same key + different hash is rejected and reserves nothing.
+	if _, _, err := repo.CreateRefundIdempotent(
+		ctx, paymentID, testUUID(t), 5000, merchant, key, "rhash-bbb",
+	); !errors.Is(err, ErrIdempotencyConflict) {
+		t.Fatalf("conflict: got %v, want ErrIdempotencyConflict", err)
+	}
+
+	if err := pool.QueryRow(ctx,
+		`SELECT refunded_amount FROM payments WHERE id = $1`,
+		paymentID,
+	).Scan(&refunded); err != nil {
+		t.Fatalf("post-conflict check: %v", err)
+	}
+
+	if refunded != 10000 {
+		t.Fatalf("refunded_amount after conflict = %d, want 10000", refunded)
+	}
+}
+
+func TestCreateIdempotentAdoptsOrphan(t *testing.T) {
+	pool := testPool(t)
+	repo := &OrderRepository{DB: pool}
+	ctx := context.Background()
+	merchant := "test-merchant-" + testUUID(t)[:8]
+	key := "test-orphan-key"
+	orphanID := testUUID(t)
+
+	// Simulate a crash between the order INSERT and the key linkage: the
+	// order row exists with the idempotency key, but the key still points
+	// nowhere.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO idempotency_keys (merchant_id, key, request_hash)
+		 VALUES ($1, $2, 'hash-orphan')`,
+		merchant,
+		key,
+	); err != nil {
+		t.Fatalf("fixture key: %v", err)
+	}
+
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO orders (id, merchant_id, amount, currency, status, idempotency_key)
+		 VALUES ($1, $2, 25000, 'INR', 'CREATED', $3)`,
+		orphanID,
+		merchant,
+		key,
+	); err != nil {
+		t.Fatalf("fixture orphan order: %v", err)
+	}
+
+	// The retry carries a fresh candidate ID, which must be ignored in
+	// favour of the orphan — no duplicate order may be created.
+	candidate := Order{
+		ID:         testUUID(t),
+		MerchantID: merchant,
+		Amount:     25000,
+		Currency:   "INR",
+		Status:     "CREATED",
+	}
+
+	got, created, err := repo.CreateIdempotent(ctx, candidate, key, "hash-orphan")
+	if err != nil {
+		t.Fatalf("orphan replay: %v", err)
+	}
+
+	if created {
+		t.Fatal("orphan replay: created = true, want false")
+	}
+
+	if got.ID != orphanID {
+		t.Fatalf("orphan replay: id = %q, want orphan %q", got.ID, orphanID)
+	}
+
+	var orderCount int64
+
+	if err := pool.QueryRow(ctx,
+		`SELECT count(*) FROM orders WHERE merchant_id = $1`,
+		merchant,
+	).Scan(&orderCount); err != nil {
+		t.Fatalf("order count: %v", err)
+	}
+
+	if orderCount != 1 {
+		t.Fatalf("orders for merchant = %d, want 1 (no duplicate)", orderCount)
+	}
+}

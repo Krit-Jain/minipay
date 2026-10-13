@@ -174,6 +174,31 @@ type OrderService struct {
 	Repo *store.OrderRepository
 }
 
+// FeeBasisPoints is the platform's percentage cut in basis points
+// (100bps = 1%): 200bps = 2%. Integer math only — amount*200/10000 truncates
+// fractions of a minor unit in the merchant's favour, deterministically.
+const FeeBasisPoints = 200
+
+// FeeFixed is the per-capture flat fee in minor units by currency. Like the
+// currency allowlist, it grows by adding an entry here; the store never
+// invents fees on its own.
+var FeeFixed = map[string]int64{
+	"INR": 300,
+	"USD": 30,
+}
+
+// computeFee returns the platform's cut for a settled payment. It runs on
+// immutable fields (amount, currency never change after creation), so the
+// service can compute it before the capture transaction without TOCTOU risk.
+func computeFee(currency string, amount int64) (int64, error) {
+	fixed, ok := FeeFixed[currency]
+	if !ok {
+		return 0, ErrUnsupportedCurrency
+	}
+
+	return amount*FeeBasisPoints/10000 + fixed, nil
+}
+
 // CreatePaymentInput bundles payment creation parameters: nine scalars
 // would be unreadable at call sites.
 type CreatePaymentInput struct {
@@ -498,7 +523,20 @@ func (s *OrderService) CapturePayment(
 		return store.Payment{}, store.ErrPaymentNotFound
 	}
 
-	return s.Repo.CapturePayment(ctx, merchantID, id)
+	// Read first, then capture: amount and currency are immutable after
+	// creation, so the fee derived here cannot go stale before the
+	// capture transaction commits (which re-validates state anyway).
+	payment, err := s.Repo.GetPayment(ctx, merchantID, id)
+	if err != nil {
+		return store.Payment{}, err
+	}
+
+	fee, err := computeFee(payment.Currency, payment.Amount)
+	if err != nil {
+		return store.Payment{}, err
+	}
+
+	return s.Repo.CapturePayment(ctx, merchantID, id, fee)
 }
 
 func (s *OrderService) VoidPayment(
@@ -588,4 +626,80 @@ func (s *OrderService) DeleteEndpoint(
 	}
 
 	return s.Repo.DeactivateEndpoint(ctx, merchantID, id)
+}
+
+func (s *OrderService) OpenDispute(
+	ctx context.Context,
+	merchantID string,
+	paymentID string,
+	amount int64,
+	reason string,
+) (store.Dispute, bool, error) {
+	if !isValidUUID(paymentID) {
+		return store.Dispute{}, false, store.ErrPaymentNotFound
+	}
+
+	if amount <= 0 || amount > MaxAmount {
+		return store.Dispute{}, false, ErrInvalidAmount
+	}
+
+	if !store.DisputeReasons[reason] {
+		return store.Dispute{}, false, store.ErrInvalidDispute
+	}
+
+	id, err := newID()
+	if err != nil {
+		return store.Dispute{}, false, err
+	}
+
+	return s.Repo.OpenDispute(ctx, merchantID, paymentID, id, amount, reason)
+}
+
+func (s *OrderService) ResolveDispute(
+	ctx context.Context,
+	merchantID string,
+	id string,
+	outcome string,
+) (store.Dispute, error) {
+	if !isValidUUID(id) {
+		return store.Dispute{}, store.ErrDisputeNotFound
+	}
+
+	if outcome != store.OutcomeWon && outcome != store.OutcomeLost {
+		return store.Dispute{}, store.ErrInvalidDispute
+	}
+
+	return s.Repo.ResolveDispute(ctx, merchantID, id, outcome)
+}
+
+func (s *OrderService) GetDispute(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) (store.Dispute, error) {
+	if !isValidUUID(id) {
+		return store.Dispute{}, store.ErrDisputeNotFound
+	}
+
+	return s.Repo.GetDispute(ctx, merchantID, id)
+}
+
+func (s *OrderService) ListDisputes(
+	ctx context.Context,
+	merchantID string,
+	cursor string,
+	limit int,
+) ([]store.Dispute, bool, error) {
+	if cursor != "" && !isValidUUID(cursor) {
+		return nil, false, store.ErrInvalidCursor
+	}
+
+	return s.Repo.ListDisputes(ctx, merchantID, limit, cursor)
+}
+
+func (s *OrderService) GetBalance(
+	ctx context.Context,
+	merchantID string,
+) ([]store.CurrencyNet, error) {
+	return s.Repo.MerchantBalance(ctx, merchantID)
 }

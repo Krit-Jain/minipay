@@ -120,7 +120,7 @@ func TestListPaymentsAndRefunds(t *testing.T) {
 		t.Fatalf("seed payment: %v", err)
 	}
 
-	if _, err := repo.CapturePayment(ctx, merchant, payment.ID); err != nil {
+	if _, err := repo.CapturePayment(ctx, merchant, payment.ID, 1300); err != nil {
 		t.Fatalf("seed capture: %v", err)
 	}
 

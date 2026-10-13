@@ -273,6 +273,28 @@ func TestMockAuthorize(t *testing.T) {
 	}
 }
 
+func TestComputeFee(t *testing.T) {
+	// 50000 paise: 2% = 1000 + 300 fixed = 1300. Integer math, exact.
+	if fee, err := computeFee("INR", 50000); err != nil || fee != 1300 {
+		t.Fatalf("INR 50000: got (%d, %v), want (1300, nil)", fee, err)
+	}
+
+	// 2500 cents: 2% = 50 + 30 fixed = 80.
+	if fee, err := computeFee("USD", 2500); err != nil || fee != 80 {
+		t.Fatalf("USD 2500: got (%d, %v), want (80, nil)", fee, err)
+	}
+
+	// 101 paise: 2% = 2.02 → truncates to 2 + 300 = 302. Fractions of a
+	// minor unit cannot exist, so truncation is the only exact rule.
+	if fee, err := computeFee("INR", 101); err != nil || fee != 302 {
+		t.Fatalf("INR 101: got (%d, %v), want (302, nil)", fee, err)
+	}
+
+	if _, err := computeFee("EUR", 100); !errors.Is(err, ErrUnsupportedCurrency) {
+		t.Fatalf("EUR: got %v, want ErrUnsupportedCurrency", err)
+	}
+}
+
 func TestCaptureVoidValidation(t *testing.T) {
 	s := &OrderService{Repo: nil} // validation runs before any DB access
 	ctx := context.Background()
@@ -390,5 +412,39 @@ func TestEndpointURLValidation(t *testing.T) {
 
 	if err := s.DeleteEndpoint(ctx, "m1", "not-a-uuid"); !errors.Is(err, store.ErrEndpointNotFound) {
 		t.Fatalf("bad endpoint id: got %v, want ErrEndpointNotFound", err)
+	}
+}
+
+func TestDisputeValidation(t *testing.T) {
+	s := &OrderService{Repo: nil} // validation runs before any DB access
+	ctx := context.Background()
+
+	validID, err := newID()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, _, err := s.OpenDispute(ctx, "m1", "not-a-uuid", 100, "fraud"); !errors.Is(err, store.ErrPaymentNotFound) {
+		t.Fatalf("bad payment id: got %v, want ErrPaymentNotFound", err)
+	}
+
+	if _, _, err := s.OpenDispute(ctx, "m1", validID, 0, "fraud"); !errors.Is(err, ErrInvalidAmount) {
+		t.Fatalf("zero amount: got %v, want ErrInvalidAmount", err)
+	}
+
+	if _, _, err := s.OpenDispute(ctx, "m1", validID, 100, "scam"); !errors.Is(err, store.ErrInvalidDispute) {
+		t.Fatalf("bad reason: got %v, want ErrInvalidDispute", err)
+	}
+
+	if _, err := s.ResolveDispute(ctx, "m1", "not-a-uuid", "won"); !errors.Is(err, store.ErrDisputeNotFound) {
+		t.Fatalf("bad dispute id: got %v, want ErrDisputeNotFound", err)
+	}
+
+	if _, err := s.ResolveDispute(ctx, "m1", validID, "maybe"); !errors.Is(err, store.ErrInvalidDispute) {
+		t.Fatalf("bad outcome: got %v, want ErrInvalidDispute", err)
+	}
+
+	if _, err := s.GetDispute(ctx, "m1", "not-a-uuid"); !errors.Is(err, store.ErrDisputeNotFound) {
+		t.Fatalf("bad get id: got %v, want ErrDisputeNotFound", err)
 	}
 }

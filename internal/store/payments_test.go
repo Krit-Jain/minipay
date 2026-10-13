@@ -62,7 +62,7 @@ func TestCreatePaymentLifecycle(t *testing.T) {
 	}
 
 	// Capturing settles both payment and order, and recapturing replays.
-	captured, err := repo.CapturePayment(ctx, merchant, first.ID)
+	captured, err := repo.CapturePayment(ctx, merchant, first.ID, 1300)
 	if err != nil {
 		t.Fatalf("capture: %v", err)
 	}
@@ -71,7 +71,12 @@ func TestCreatePaymentLifecycle(t *testing.T) {
 		t.Fatalf("captured status = %q, want SUCCEEDED", captured.Status)
 	}
 
-	recaptured, err := repo.CapturePayment(ctx, merchant, first.ID)
+	// 50000 paise at 200bps + 300 fixed = 1300 platform fee.
+	if captured.Fee != 1300 {
+		t.Fatalf("captured fee = %d, want 1300", captured.Fee)
+	}
+
+	recaptured, err := repo.CapturePayment(ctx, merchant, first.ID, 1300)
 	if err != nil {
 		t.Fatalf("recapture: %v", err)
 	}
@@ -275,7 +280,7 @@ func TestVoidReleasesOrder(t *testing.T) {
 		t.Fatalf("re-void: id = %q, want %q", revoided.ID, held.ID)
 	}
 
-	if _, err := repo.CapturePayment(ctx, merchant, held.ID); !errors.Is(err, ErrPaymentNotCapturable) {
+	if _, err := repo.CapturePayment(ctx, merchant, held.ID, 1300); !errors.Is(err, ErrPaymentNotCapturable) {
 		t.Fatalf("capture after void: got %v, want ErrPaymentNotCapturable", err)
 	}
 
@@ -298,7 +303,7 @@ func TestVoidReleasesOrder(t *testing.T) {
 
 	// And a settled payment cannot be voided: money that moved must be
 	// refunded instead.
-	if _, err := repo.CapturePayment(ctx, merchant, retry.ID); err != nil {
+	if _, err := repo.CapturePayment(ctx, merchant, retry.ID, 1300); err != nil {
 		t.Fatalf("capture retry: %v", err)
 	}
 
@@ -306,7 +311,7 @@ func TestVoidReleasesOrder(t *testing.T) {
 		t.Fatalf("void after capture: got %v, want ErrPaymentNotVoidable", err)
 	}
 
-	if _, err := repo.CapturePayment(ctx, merchant, testUUID(t)); !errors.Is(err, ErrPaymentNotFound) {
+	if _, err := repo.CapturePayment(ctx, merchant, testUUID(t), 0); !errors.Is(err, ErrPaymentNotFound) {
 		t.Fatalf("capture unknown: got %v, want ErrPaymentNotFound", err)
 	}
 }
@@ -368,7 +373,7 @@ func TestDeclinedPaymentLeavesOrderPayable(t *testing.T) {
 		t.Fatalf("order status = %q, want CREATED", got.Status)
 	}
 
-	if _, err := repo.CapturePayment(ctx, merchant, declined.ID); !errors.Is(err, ErrPaymentNotCapturable) {
+	if _, err := repo.CapturePayment(ctx, merchant, declined.ID, 1300); !errors.Is(err, ErrPaymentNotCapturable) {
 		t.Fatalf("capture declined: got %v, want ErrPaymentNotCapturable", err)
 	}
 

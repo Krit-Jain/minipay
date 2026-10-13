@@ -144,8 +144,8 @@ func (r *OrderRepository) ListPayments(
 	const columns = `
 		SELECT p.id::text, p.order_id::text, p.amount,
 		       p.currency, p.method, COALESCE(p.card_last4, ''),
-		       COALESCE(p.failure_code, ''), p.status,
-		       p.refunded_amount, p.created_at
+		       COALESCE(p.failure_code, ''), p.status, p.fee,
+		       p.refunded_amount, p.disputed_amount, p.created_at
 		FROM payments p
 		JOIN orders o ON o.id = p.order_id
 		WHERE o.merchant_id = $1
@@ -165,7 +165,9 @@ func (r *OrderRepository) ListPayments(
 				&payment.CardLast4,
 				&payment.FailureCode,
 				&payment.Status,
+				&payment.Fee,
 				&payment.RefundedAmount,
+				&payment.DisputedAmount,
 				&payment.CreatedAt,
 			); err != nil {
 				return nil, err

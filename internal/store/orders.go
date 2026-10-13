@@ -164,7 +164,7 @@ func (r *OrderRepository) CreateIdempotent(
 	// cannot happen.
 	if err := recordEventTx(
 		ctx, tx, order.MerchantID, EventOrderCreated,
-		order.ID, "", "", order,
+		order.ID, "", "", "", order,
 	); err != nil {
 		return Order{}, false, err
 	}

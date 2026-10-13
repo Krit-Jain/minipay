@@ -68,6 +68,7 @@ func cleanupMerchant(t *testing.T, repo *OrderRepository, merchant string) {
 			`DELETE FROM deliveries WHERE event_id IN (SELECT id FROM events WHERE merchant_id = $1)`,
 			`DELETE FROM events WHERE merchant_id = $1`,
 			`DELETE FROM merchant_endpoints WHERE merchant_id = $1`,
+			`DELETE FROM disputes WHERE merchant_id = $1`,
 			`DELETE FROM refund_idempotency_keys WHERE merchant_id = $1`,
 			`DELETE FROM payment_idempotency_keys WHERE merchant_id = $1`,
 			`DELETE FROM idempotency_keys WHERE merchant_id = $1`,
@@ -169,7 +170,7 @@ func TestWebhookFanoutAndTypes(t *testing.T) {
 		t.Fatalf("authorize: %v", err)
 	}
 
-	if _, err := repo.CapturePayment(ctx, merchant, payment.ID); err != nil {
+	if _, err := repo.CapturePayment(ctx, merchant, payment.ID, 1300); err != nil {
 		t.Fatalf("capture: %v", err)
 	}
 

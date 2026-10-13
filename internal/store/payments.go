@@ -35,7 +35,9 @@ type Payment struct {
 	CardLast4      string    `json:"card_last4,omitempty"`
 	FailureCode    string    `json:"failure_code,omitempty"`
 	Status         string    `json:"status"`
+	Fee            int64     `json:"fee"`
 	RefundedAmount int64     `json:"refunded_amount"`
+	DisputedAmount int64     `json:"disputed_amount"`
 	CreatedAt      time.Time `json:"created_at"`
 }
 
@@ -107,8 +109,8 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 		err = tx.QueryRow(ctx, `
 			SELECT id::text, order_id::text, amount,
 			       currency, method, COALESCE(card_last4, ''),
-			       COALESCE(failure_code, ''), status,
-			       refunded_amount, created_at
+			       COALESCE(failure_code, ''), status, fee,
+			       refunded_amount, disputed_amount, created_at
 			FROM payments
 			WHERE id = $1
 		`, *existingPaymentID).Scan(
@@ -120,7 +122,9 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 			&existing.CardLast4,
 			&existing.FailureCode,
 			&existing.Status,
+			&existing.Fee,
 			&existing.RefundedAmount,
+			&existing.DisputedAmount,
 			&existing.CreatedAt,
 		)
 		if err != nil {
@@ -232,7 +236,7 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 
 	if err := recordEventTx(
 		ctx, tx, merchantID, eventType,
-		payment.OrderID, payment.ID, "", payment,
+		payment.OrderID, payment.ID, "", "", payment,
 	); err != nil {
 		return Payment{}, false, err
 	}
@@ -293,8 +297,8 @@ func (r *OrderRepository) GetPayment(
 	err := r.DB.QueryRow(ctx, `
 		SELECT p.id::text, p.order_id::text, p.amount,
 		       p.currency, p.method, COALESCE(p.card_last4, ''),
-		       COALESCE(p.failure_code, ''), p.status,
-		       p.refunded_amount, p.created_at
+		       COALESCE(p.failure_code, ''), p.status, p.fee,
+		       p.refunded_amount, p.disputed_amount, p.created_at
 		FROM payments p
 		JOIN orders o ON o.id = p.order_id
 		WHERE p.id = $1 AND o.merchant_id = $2
@@ -307,7 +311,9 @@ func (r *OrderRepository) GetPayment(
 		&payment.CardLast4,
 		&payment.FailureCode,
 		&payment.Status,
+		&payment.Fee,
 		&payment.RefundedAmount,
+		&payment.DisputedAmount,
 		&payment.CreatedAt,
 	)
 
@@ -332,6 +338,7 @@ func (r *OrderRepository) CapturePayment(
 	ctx context.Context,
 	merchantID string,
 	id string,
+	fee int64,
 ) (Payment, error) {
 	tx, err := r.DB.Begin(ctx)
 	if err != nil {
@@ -344,8 +351,8 @@ func (r *OrderRepository) CapturePayment(
 	err = tx.QueryRow(ctx, `
 		SELECT p.id::text, p.order_id::text, p.amount,
 		       p.currency, p.method, COALESCE(p.card_last4, ''),
-		       COALESCE(p.failure_code, ''), p.status,
-		       p.refunded_amount, p.created_at
+		       COALESCE(p.failure_code, ''), p.status, p.fee,
+		       p.refunded_amount, p.disputed_amount, p.created_at
 		FROM payments p
 		JOIN orders o ON o.id = p.order_id
 		WHERE p.id = $1 AND o.merchant_id = $2
@@ -359,7 +366,9 @@ func (r *OrderRepository) CapturePayment(
 		&payment.CardLast4,
 		&payment.FailureCode,
 		&payment.Status,
+		&payment.Fee,
 		&payment.RefundedAmount,
+		&payment.DisputedAmount,
 		&payment.CreatedAt,
 	)
 
@@ -384,8 +393,8 @@ func (r *OrderRepository) CapturePayment(
 	}
 
 	if _, err := tx.Exec(ctx, `
-		UPDATE payments SET status = 'SUCCEEDED' WHERE id = $1
-	`, payment.ID); err != nil {
+		UPDATE payments SET status = 'SUCCEEDED', fee = $2 WHERE id = $1
+	`, payment.ID, fee); err != nil {
 		return Payment{}, err
 	}
 
@@ -396,12 +405,13 @@ func (r *OrderRepository) CapturePayment(
 	}
 
 	payment.Status = "SUCCEEDED"
+	payment.Fee = fee
 
 	// The transition itself is the event: replays of an already-SUCCEEDED
 	// payment returned above without emitting.
 	if err := recordEventTx(
 		ctx, tx, merchantID, EventPaymentCaptured,
-		payment.OrderID, payment.ID, "", payment,
+		payment.OrderID, payment.ID, "", "", payment,
 	); err != nil {
 		return Payment{}, err
 	}
@@ -433,8 +443,8 @@ func (r *OrderRepository) VoidPayment(
 	err = tx.QueryRow(ctx, `
 		SELECT p.id::text, p.order_id::text, p.amount,
 		       p.currency, p.method, COALESCE(p.card_last4, ''),
-		       COALESCE(p.failure_code, ''), p.status,
-		       p.refunded_amount, p.created_at
+		       COALESCE(p.failure_code, ''), p.status, p.fee,
+		       p.refunded_amount, p.disputed_amount, p.created_at
 		FROM payments p
 		JOIN orders o ON o.id = p.order_id
 		WHERE p.id = $1 AND o.merchant_id = $2
@@ -448,7 +458,9 @@ func (r *OrderRepository) VoidPayment(
 		&payment.CardLast4,
 		&payment.FailureCode,
 		&payment.Status,
+		&payment.Fee,
 		&payment.RefundedAmount,
+		&payment.DisputedAmount,
 		&payment.CreatedAt,
 	)
 
@@ -489,7 +501,7 @@ func (r *OrderRepository) VoidPayment(
 	// Same rule as capture: only the transition emits.
 	if err := recordEventTx(
 		ctx, tx, merchantID, EventPaymentVoided,
-		payment.OrderID, payment.ID, "", payment,
+		payment.OrderID, payment.ID, "", "", payment,
 	); err != nil {
 		return Payment{}, err
 	}

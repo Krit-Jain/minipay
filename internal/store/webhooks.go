@@ -24,6 +24,9 @@ const (
 	EventPaymentCaptured   = "payment.captured"
 	EventPaymentVoided     = "payment.voided"
 	EventRefundCreated     = "refund.created"
+	EventDisputeOpened     = "dispute.opened"
+	EventDisputeWon        = "dispute.won"
+	EventDisputeLost       = "dispute.lost"
 )
 
 var ErrEndpointNotFound = errors.New("webhook endpoint not found")
@@ -179,6 +182,7 @@ func recordEventTx(
 	orderID string,
 	paymentID string,
 	refundID string,
+	disputeID string,
 	payload any,
 ) error {
 	body, err := json.Marshal(payload)
@@ -193,10 +197,12 @@ func recordEventTx(
 
 	_, err = tx.Exec(ctx, `
 		INSERT INTO events
-			(id, merchant_id, type, order_id, payment_id, refund_id, payload)
+			(id, merchant_id, type, order_id, payment_id, refund_id,
+			 dispute_id, payload)
 		VALUES ($1, $2, $3, NULLIF($4, '')::uuid, NULLIF($5, '')::uuid,
-		        NULLIF($6, '')::uuid, $7::jsonb)
-	`, eventID, merchantID, eventType, orderID, paymentID, refundID, string(body))
+		        NULLIF($6, '')::uuid, NULLIF($7, '')::uuid, $8::jsonb)
+	`, eventID, merchantID, eventType, orderID, paymentID, refundID,
+		disputeID, string(body))
 	if err != nil {
 		return err
 	}

@@ -313,7 +313,7 @@ func (r *OrderRepository) CreateRefundIdempotent(
 	// here means this call finished the refund.
 	if err := recordEventTx(
 		ctx, tx, merchantID, EventRefundCreated,
-		"", refund.PaymentID, refund.ID, refund,
+		"", refund.PaymentID, refund.ID, "", refund,
 	); err != nil {
 		return Refund{}, false, err
 	}

@@ -26,6 +26,10 @@ const (
 	CodeInvalidPaymentID      = "invalid_payment_id"
 	CodeInvalidEndpointURL    = "invalid_endpoint_url"
 	CodeEndpointNotFound      = "endpoint_not_found"
+	CodeInvalidDispute        = "invalid_dispute"
+	CodeDisputeNotFound       = "dispute_not_found"
+	CodeDisputeNotAllowed     = "dispute_not_allowed"
+	CodeDisputeNotOpen        = "dispute_not_open"
 	CodeInvalidCursor         = "invalid_cursor"
 	CodeNotFound              = "not_found"
 	CodeOrderNotFound         = "order_not_found"
@@ -75,6 +79,9 @@ func statusAndCode(err error) (int, string) {
 	case errors.Is(err, store.ErrInvalidEndpointURL):
 		return http.StatusBadRequest, CodeInvalidEndpointURL
 
+	case errors.Is(err, store.ErrInvalidDispute):
+		return http.StatusBadRequest, CodeInvalidDispute
+
 	case errors.Is(err, store.ErrInvalidCursor),
 		errors.Is(err, ErrInvalidPagination):
 		return http.StatusBadRequest, CodeInvalidCursor
@@ -87,6 +94,9 @@ func statusAndCode(err error) (int, string) {
 
 	case errors.Is(err, store.ErrEndpointNotFound):
 		return http.StatusNotFound, CodeEndpointNotFound
+
+	case errors.Is(err, store.ErrDisputeNotFound):
+		return http.StatusNotFound, CodeDisputeNotFound
 
 	case errors.Is(err, store.ErrOrderAlreadyPaid):
 		return http.StatusConflict, CodeOrderAlreadyPaid
@@ -102,6 +112,12 @@ func statusAndCode(err error) (int, string) {
 
 	case errors.Is(err, store.ErrPaymentNotVoidable):
 		return http.StatusConflict, CodePaymentNotVoidable
+
+	case errors.Is(err, store.ErrDisputeNotAllowed):
+		return http.StatusConflict, CodeDisputeNotAllowed
+
+	case errors.Is(err, store.ErrDisputeNotOpen):
+		return http.StatusConflict, CodeDisputeNotOpen
 
 	case errors.Is(err, store.ErrInvalidAPIKey):
 		return http.StatusUnauthorized, CodeUnauthorized

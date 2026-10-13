@@ -80,6 +80,10 @@ func main() {
 		Service: orderService,
 	}
 
+	disputeHandler := &httpapi.DisputeHandler{
+		Service: orderService,
+	}
+
 	api := http.NewServeMux()
 
 	api.HandleFunc("POST /v1/orders", orderHandler.CreateOrder)
@@ -95,6 +99,11 @@ func main() {
 	api.HandleFunc("POST /v1/webhook_endpoints", webhookHandler.CreateEndpoint)
 	api.HandleFunc("GET /v1/webhook_endpoints", webhookHandler.ListEndpoints)
 	api.HandleFunc("DELETE /v1/webhook_endpoints/{id}", webhookHandler.DeleteEndpoint)
+	api.HandleFunc("POST /v1/payments/{id}/disputes", disputeHandler.CreateDispute)
+	api.HandleFunc("POST /v1/disputes/{id}/resolve", disputeHandler.ResolveDispute)
+	api.HandleFunc("GET /v1/disputes", disputeHandler.ListDisputes)
+	api.HandleFunc("GET /v1/disputes/{id}", disputeHandler.GetDispute)
+	api.HandleFunc("GET /v1/balance", disputeHandler.GetBalance)
 
 	// Budgets: generous per-IP protection for everything (including the
 	// auth lookups themselves), tighter per-merchant quotas past auth. The

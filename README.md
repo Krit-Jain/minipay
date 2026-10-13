@@ -52,7 +52,7 @@ O=$(curl -s -X POST localhost:8080/v1/orders \
 
 P=$(curl -s -X POST localhost:8080/v1/orders/$O/payments \
   -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: pay-1' -d '{"amount":2500}' | jq -r .id)
+  -H 'Idempotency-Key: pay-1' -d '{"amount":2500,"method":"card","card_number":"4242424242424242"}' | jq -r .id)
 
 curl -s -X POST localhost:8080/v1/payments/$P/capture -H "Authorization: Bearer $KEY" | jq .status
 # "SUCCEEDED"
@@ -85,6 +85,28 @@ All endpoints require `Authorization: Bearer <key>` except the probes. All money
 | `GET /healthz` | Liveness probe (public) | `200 ok` |
 | `GET /readyz` | Readiness probe, pings Postgres (public) | `200` / `503` |
 
+### Payment methods
+
+```bash
+curl -X POST localhost:8080/v1/orders/<order-uuid>/payments \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: pay-123' \
+  -d '{"amount":50000,"method":"card","card_number":"4242424242424242"}'
+```
+
+| Method | Required field | Validation |
+|---|---|---|
+| `card` | `card_number` | 13–19 digits + Luhn checksum; only the last 4 are stored, never the PAN |
+| `upi` | `vpa` | Handle format (`name@bank`); travels in memory only, nothing stored |
+| `netbanking` | `bank` | Allowlist: `HDFC`, `ICICI`, `SBIN`, `AXIS`, `KOTAK` |
+
+Bad details are `400` (`unsupported_payment_method`, `invalid_payment_details`).
+Well-formed requests reach the mock gateway, which approves everything except two
+documented test triggers: card `4000000000000002` → `card_declined`, VPA `fail@upi` →
+`upi_declined`. A decline still returns `201`, but with `status: FAILED` and a
+`failure_code` — the failed row is the audit trail, and the order stays `CREATED`
+so the customer can try again. `FAILED` payments can never be captured or refunded.
+
 ### Error envelope
 
 Every error shares one shape, so clients can switch on `code` and quote `request_id` to support:
@@ -95,7 +117,7 @@ Every error shares one shape, so clients can switch on `code` and quote `request
 
 | Status | Codes |
 |---|---|
-| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
+| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `unsupported_payment_method`, `invalid_payment_details`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
 | `401` | `unauthorized` (missing, unknown, or revoked key) |
 | `404` | `order_not_found`, `payment_not_found` (foreign tenants' records read as `404`) |
 | `409` | `idempotency_conflict`, `order_already_paid`, `refund_not_allowed`, `payment_not_capturable`, `payment_not_voidable` |
@@ -125,6 +147,7 @@ page fetches can never shift, skip, or duplicate records.
 ```mermaid
 flowchart LR
     A[CREATED<br/>order intent] -->|POST .../payments| B[AUTHORIZED<br/>funds held]
+    A -->|gateway declines| F[FAILED<br/>order stays CREATED]
     B -->|POST .../capture| C[SUCCEEDED<br/>refundable]
     B -->|POST .../void| D[CANCELLED<br/>order back to CREATED]
     C -->|POST .../refunds| E[Refunded<br/>partially or fully]
@@ -240,7 +263,7 @@ cmd/apikey     CLI that mints secret API keys
 internal/httpapi  auth middleware, validation, envelope, pagination, handlers
 internal/payment  business rules + validation before any DB access
 internal/store    transactional Postgres (orders, payments, refunds, keys, limits)
-migrations/    numbered, re-runnable schema (0001–0007)
+migrations/    numbered, re-runnable schema (0001–0008)
 ```
 
 Amounts are integer minor units (paise/cents) — never floats. IDs are app-generated UUIDv4.
@@ -250,6 +273,7 @@ Request fingerprints are SHA256. API secrets are stored as hashes only.
 
 ## Known limitations
 
-1. Authorizations never expire — a hold stays until captured/voided (Phase F).
+1. Authorizations never expire — a hold stays until captured or voided; a
+   background sweeper for stale holds is planned.
 2. One full-amount payment per order — no split/partial payments.
 3. Per-IP rate limits are per instance; only merchant budgets are shared.

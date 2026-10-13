@@ -19,6 +19,8 @@ const (
 	CodeAmountTooLarge        = "amount_too_large"
 	CodeAmountMismatch        = "amount_mismatch"
 	CodeUnsupportedCurrency   = "unsupported_currency"
+	CodeUnsupportedMethod     = "unsupported_payment_method"
+	CodeInvalidPaymentDetails = "invalid_payment_details"
 	CodeMissingIdempotencyKey = "missing_idempotency_key"
 	CodeInvalidIdempotencyKey = "invalid_idempotency_key"
 	CodeInvalidPaymentID      = "invalid_payment_id"
@@ -52,6 +54,12 @@ func statusAndCode(err error) (int, string) {
 
 	case errors.Is(err, payment.ErrUnsupportedCurrency):
 		return http.StatusBadRequest, CodeUnsupportedCurrency
+
+	case errors.Is(err, payment.ErrUnsupportedPaymentMethod):
+		return http.StatusBadRequest, CodeUnsupportedMethod
+
+	case errors.Is(err, payment.ErrInvalidPaymentDetails):
+		return http.StatusBadRequest, CodeInvalidPaymentDetails
 
 	case errors.Is(err, payment.ErrMissingIdempotencyKey):
 		return http.StatusBadRequest, CodeMissingIdempotencyKey

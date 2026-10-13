@@ -110,7 +110,7 @@ func TestListPaymentsAndRefunds(t *testing.T) {
 
 	payment, _, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"list-pay-key",
@@ -171,7 +171,7 @@ func TestListPaymentsAndRefunds(t *testing.T) {
 
 	fp, _, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 1000},
+		Payment{ID: testUUID(t), Amount: 1000, Method: "card", Status: "AUTHORIZED"},
 		foreign.ID,
 		"other-"+merchant,
 		"list-foreign-pay-key",

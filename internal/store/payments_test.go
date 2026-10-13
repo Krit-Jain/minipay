@@ -29,7 +29,7 @@ func TestCreatePaymentLifecycle(t *testing.T) {
 
 	first, created, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"pay-key",
@@ -92,7 +92,7 @@ func TestCreatePaymentLifecycle(t *testing.T) {
 	// Same key + same hash replays the original payment.
 	replay, created, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"pay-key",
@@ -113,7 +113,7 @@ func TestCreatePaymentLifecycle(t *testing.T) {
 	// Same key + different hash is rejected.
 	if _, _, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"pay-key",
@@ -178,7 +178,7 @@ func TestCreatePaymentRejects(t *testing.T) {
 	// reusing the same key with the correct amount must succeed fresh.
 	payment, created, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"pay-mismatch-key",
@@ -195,7 +195,7 @@ func TestCreatePaymentRejects(t *testing.T) {
 	// A paid order cannot be paid again, even with a fresh key.
 	if _, _, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"pay-second-key",
@@ -238,7 +238,7 @@ func TestVoidReleasesOrder(t *testing.T) {
 
 	held, _, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"void-pay-key",
@@ -282,7 +282,7 @@ func TestVoidReleasesOrder(t *testing.T) {
 	// The order is payable again with a fresh key.
 	retry, created, err := repo.CreatePaymentIdempotent(
 		ctx,
-		Payment{ID: testUUID(t), Amount: 50000},
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
 		order.ID,
 		merchant,
 		"void-retry-key",
@@ -308,5 +308,83 @@ func TestVoidReleasesOrder(t *testing.T) {
 
 	if _, err := repo.CapturePayment(ctx, merchant, testUUID(t)); !errors.Is(err, ErrPaymentNotFound) {
 		t.Fatalf("capture unknown: got %v, want ErrPaymentNotFound", err)
+	}
+}
+
+func TestDeclinedPaymentLeavesOrderPayable(t *testing.T) {
+	pool := testPool(t)
+	repo := &OrderRepository{DB: pool}
+	ctx := context.Background()
+	merchant := "test-merchant-" + testUUID(t)[:8]
+
+	order, _, err := repo.CreateIdempotent(ctx, Order{
+		ID:         testUUID(t),
+		MerchantID: merchant,
+		Amount:     50000,
+		Currency:   "INR",
+		Status:     "CREATED",
+	}, "decline-order-key", "dhash-order")
+	if err != nil {
+		t.Fatalf("fixture order: %v", err)
+	}
+
+	// A gateway decline is recorded, not thrown away: the FAILED row is the
+	// audit trail of the attempt, with the reason attached.
+	declined, created, err := repo.CreatePaymentIdempotent(
+		ctx,
+		Payment{
+			ID:          testUUID(t),
+			Amount:      50000,
+			Method:      "card",
+			CardLast4:   "0002",
+			FailureCode: "card_declined",
+			Status:      "FAILED",
+		},
+		order.ID,
+		merchant,
+		"decline-pay-key",
+		"dhash-pay",
+	)
+	if err != nil {
+		t.Fatalf("declined payment: %v", err)
+	}
+
+	if !created || declined.Status != "FAILED" {
+		t.Fatalf("decline: unexpected %+v created=%v", declined, created)
+	}
+
+	if declined.FailureCode != "card_declined" || declined.CardLast4 != "0002" {
+		t.Fatalf("decline: details lost %+v", declined)
+	}
+
+	// The order is untouched and payable again; the failed hold settles
+	// into nothing.
+	got, err := repo.GetOrder(ctx, merchant, order.ID)
+	if err != nil {
+		t.Fatalf("get order after decline: %v", err)
+	}
+
+	if got.Status != "CREATED" {
+		t.Fatalf("order status = %q, want CREATED", got.Status)
+	}
+
+	if _, err := repo.CapturePayment(ctx, merchant, declined.ID); !errors.Is(err, ErrPaymentNotCapturable) {
+		t.Fatalf("capture declined: got %v, want ErrPaymentNotCapturable", err)
+	}
+
+	retry, created, err := repo.CreatePaymentIdempotent(
+		ctx,
+		Payment{ID: testUUID(t), Amount: 50000, Method: "card", Status: "AUTHORIZED"},
+		order.ID,
+		merchant,
+		"decline-retry-key",
+		"dhash-retry",
+	)
+	if err != nil {
+		t.Fatalf("repay after decline: %v", err)
+	}
+
+	if !created || retry.Status != "AUTHORIZED" {
+		t.Fatalf("repay after decline: unexpected %+v created=%v", retry, created)
 	}
 }

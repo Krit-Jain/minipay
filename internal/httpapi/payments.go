@@ -12,7 +12,11 @@ import (
 )
 
 type CreatePaymentRequest struct {
-	Amount int64 `json:"amount"`
+	Amount     int64  `json:"amount"`
+	Method     string `json:"method"`
+	CardNumber string `json:"card_number,omitempty"`
+	VPA        string `json:"vpa,omitempty"`
+	Bank       string `json:"bank,omitempty"`
 }
 
 type PaymentHandler struct {
@@ -71,10 +75,16 @@ func (h *PaymentHandler) CreatePayment(
 
 	pay, created, err := h.Service.CreatePayment(
 		ctx,
-		MerchantFromContext(r.Context()),
-		orderID,
-		req.Amount,
-		key,
+		payment.CreatePaymentInput{
+			MerchantID: MerchantFromContext(r.Context()),
+			OrderID:    orderID,
+			Amount:     req.Amount,
+			Method:     req.Method,
+			CardNumber: req.CardNumber,
+			VPA:        req.VPA,
+			Bank:       req.Bank,
+			Key:        key,
+		},
 	)
 
 	if err != nil {

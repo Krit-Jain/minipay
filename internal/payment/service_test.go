@@ -154,24 +154,122 @@ func TestCreatePaymentValidation(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, _, err := s.CreatePayment(ctx, "m1", validID, 0, "k1"); !errors.Is(err, ErrInvalidAmount) {
+	base := CreatePaymentInput{
+		MerchantID: "m1",
+		OrderID:    validID,
+		Amount:     100,
+		Method:     PaymentMethodCard,
+		CardNumber: "4242424242424242",
+		Key:        "k1",
+	}
+
+	withAmount := base
+	withAmount.Amount = 0
+
+	if _, _, err := s.CreatePayment(ctx, withAmount); !errors.Is(err, ErrInvalidAmount) {
 		t.Fatalf("zero amount: got %v, want ErrInvalidAmount", err)
 	}
 
-	if _, _, err := s.CreatePayment(ctx, "m1", validID, MaxAmount+1, "k1"); !errors.Is(err, ErrAmountTooLarge) {
+	withBig := base
+	withBig.Amount = MaxAmount + 1
+
+	if _, _, err := s.CreatePayment(ctx, withBig); !errors.Is(err, ErrAmountTooLarge) {
 		t.Fatalf("oversize amount: got %v, want ErrAmountTooLarge", err)
 	}
 
-	if _, _, err := s.CreatePayment(ctx, "m1", "not-a-uuid", 100, "k1"); !errors.Is(err, store.ErrOrderNotFound) {
+	withBadID := base
+	withBadID.OrderID = "not-a-uuid"
+
+	if _, _, err := s.CreatePayment(ctx, withBadID); !errors.Is(err, store.ErrOrderNotFound) {
 		t.Fatalf("bad order ID: got %v, want ErrOrderNotFound", err)
 	}
 
-	if _, _, err := s.CreatePayment(ctx, "m1", validID, 100, ""); !errors.Is(err, ErrMissingIdempotencyKey) {
+	withNoKey := base
+	withNoKey.Key = ""
+
+	if _, _, err := s.CreatePayment(ctx, withNoKey); !errors.Is(err, ErrMissingIdempotencyKey) {
 		t.Fatalf("empty key: got %v, want ErrMissingIdempotencyKey", err)
 	}
 
-	if _, _, err := s.CreatePayment(ctx, "m1", validID, 100, strings.Repeat("k", 256)); !errors.Is(err, ErrIdempotencyKeyTooLong) {
+	withLongKey := base
+	withLongKey.Key = strings.Repeat("k", 256)
+
+	if _, _, err := s.CreatePayment(ctx, withLongKey); !errors.Is(err, ErrIdempotencyKeyTooLong) {
 		t.Fatalf("256-char key: got %v, want ErrIdempotencyKeyTooLong", err)
+	}
+
+	withBadMethod := base
+	withBadMethod.Method = "cash"
+
+	if _, _, err := s.CreatePayment(ctx, withBadMethod); !errors.Is(err, ErrUnsupportedPaymentMethod) {
+		t.Fatalf("cash method: got %v, want ErrUnsupportedPaymentMethod", err)
+	}
+
+	withBadCard := base
+	withBadCard.CardNumber = "1234"
+
+	if _, _, err := s.CreatePayment(ctx, withBadCard); !errors.Is(err, ErrInvalidPaymentDetails) {
+		t.Fatalf("short card: got %v, want ErrInvalidPaymentDetails", err)
+	}
+
+	withBadUPI := base
+	withBadUPI.Method = PaymentMethodUPI
+	withBadUPI.VPA = "not-a-vpa"
+
+	if _, _, err := s.CreatePayment(ctx, withBadUPI); !errors.Is(err, ErrInvalidPaymentDetails) {
+		t.Fatalf("bad VPA: got %v, want ErrInvalidPaymentDetails", err)
+	}
+
+	withBadBank := base
+	withBadBank.Method = PaymentMethodNetbanking
+	withBadBank.Bank = "NOPE"
+
+	if _, _, err := s.CreatePayment(ctx, withBadBank); !errors.Is(err, ErrInvalidPaymentDetails) {
+		t.Fatalf("bad bank: got %v, want ErrInvalidPaymentDetails", err)
+	}
+}
+
+func TestLuhnAndVPA(t *testing.T) {
+	for _, good := range []string{"4242424242424242", "4000000000000002", "4111 1111 1111 1111"} {
+		if !validCardNumber(good) {
+			t.Fatalf("card %q: rejected, want accepted", good)
+		}
+	}
+
+	for _, bad := range []string{"", "1234", "4242424242424243", "abcd", "41111111111111111111"} {
+		if validCardNumber(bad) {
+			t.Fatalf("card %q: accepted, want rejected", bad)
+		}
+	}
+
+	for _, good := range []string{"alice@okhdfc", "98765@ybl", "fail@upi"} {
+		if !validVPA(good) {
+			t.Fatalf("vpa %q: rejected, want accepted", good)
+		}
+	}
+
+	for _, bad := range []string{"", "no-at-sign", "@bank", "a@b", "x@y!"} {
+		if validVPA(bad) {
+			t.Fatalf("vpa %q: accepted, want rejected", bad)
+		}
+	}
+}
+
+func TestMockAuthorize(t *testing.T) {
+	if ok, code := mockAuthorize(PaymentMethodCard, "4242424242424242", ""); !ok || code != "" {
+		t.Fatalf("good card: got (%v, %q), want (true, empty)", ok, code)
+	}
+
+	if ok, code := mockAuthorize(PaymentMethodCard, DeclineTestCard, ""); ok || code != FailureCardDeclined {
+		t.Fatalf("decline card: got (%v, %q)", ok, code)
+	}
+
+	if ok, code := mockAuthorize(PaymentMethodUPI, "", DeclineTestVPA); ok || code != FailureUPIDeclined {
+		t.Fatalf("decline vpa: got (%v, %q)", ok, code)
+	}
+
+	if ok, _ := mockAuthorize(PaymentMethodNetbanking, "", ""); !ok {
+		t.Fatal("netbanking: declined, want approved")
 	}
 }
 
@@ -194,12 +292,12 @@ func TestHashPaymentRequestDeterministic(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	h1, err := hashPaymentRequest(orderID, 100)
+	h1, err := hashPaymentRequest(orderID, 100, PaymentMethodCard)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	h2, err := hashPaymentRequest(orderID, 100)
+	h2, err := hashPaymentRequest(orderID, 100, PaymentMethodCard)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,13 +306,22 @@ func TestHashPaymentRequestDeterministic(t *testing.T) {
 		t.Fatal("same input must produce same hash")
 	}
 
-	h3, err := hashPaymentRequest(orderID, 200)
+	h3, err := hashPaymentRequest(orderID, 200, PaymentMethodCard)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	if h1 == h3 {
 		t.Fatal("different amount must produce different hash")
+	}
+
+	h4, err := hashPaymentRequest(orderID, 100, PaymentMethodUPI)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if h1 == h4 {
+		t.Fatal("different method must produce different hash")
 	}
 }
 

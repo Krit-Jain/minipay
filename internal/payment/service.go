@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 
 	"minipay/internal/store"
 )
@@ -33,6 +34,41 @@ var ErrMissingIdempotencyKey = errors.New(
 var ErrIdempotencyKeyTooLong = errors.New("Idempotency-Key is too long")
 
 var ErrInvalidPaymentID = errors.New("invalid payment ID")
+
+var ErrUnsupportedPaymentMethod = errors.New("unsupported payment method")
+
+var ErrInvalidPaymentDetails = errors.New("invalid payment details")
+
+const (
+	PaymentMethodCard       = "card"
+	PaymentMethodUPI        = "upi"
+	PaymentMethodNetbanking = "netbanking"
+)
+
+// SupportedBanks is the netbanking allowlist. Codes are short names on
+// purpose: the mock gateway holds no real bank integrations.
+var SupportedBanks = map[string]bool{
+	"HDFC":  true,
+	"ICICI": true,
+	"SBIN":  true,
+	"AXIS":  true,
+	"KOTAK": true,
+}
+
+// Gateway failure codes, stored on FAILED payments and returned as
+// failure_code so clients can react programmatically.
+const (
+	FailureCardDeclined = "card_declined"
+	FailureUPIDeclined  = "upi_declined"
+)
+
+// Deterministic mock-gateway triggers, documented for integrators: these
+// inputs always decline, everything else approves, so both paths are
+// walkable without flakiness.
+const (
+	DeclineTestCard = "4000000000000002"
+	DeclineTestVPA  = "fail@upi"
+)
 
 // MaxAmount caps order/refund amounts (minor units, paise for INR).
 // 1_000_000_000 paise = Rs 1 crore. It guards against absurd inputs and
@@ -69,8 +105,85 @@ func isValidUUID(s string) bool {
 	return true
 }
 
+// validCardNumber checks length, digits, and the Luhn checksum — the same
+// first line of defense every gateway runs before contacting a bank.
+func validCardNumber(number string) bool {
+	digits := make([]byte, 0, len(number))
+
+	for i := 0; i < len(number); i++ {
+		c := number[i]
+
+		if c == ' ' {
+			continue
+		}
+
+		if c < '0' || c > '9' {
+			return false
+		}
+
+		digits = append(digits, c-'0')
+	}
+
+	if len(digits) < 13 || len(digits) > 19 {
+		return false
+	}
+
+	sum := 0
+
+	for i := len(digits) - 1; i >= 0; i-- {
+		d := int(digits[i])
+
+		if (len(digits)-1-i)%2 == 1 {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+
+		sum += d
+	}
+
+	return sum%10 == 0
+}
+
+var vpaPattern = regexp.MustCompile(`^[\w.\-]{2,256}@[a-zA-Z]{2,64}$`)
+
+func validVPA(vpa string) bool {
+	return vpaPattern.MatchString(vpa)
+}
+
+// mockAuthorize stands in for the acquiring bank. Only the documented test
+// triggers decline; everything well-formed approves.
+func mockAuthorize(method, cardNumber, vpa string) (bool, string) {
+	switch method {
+	case PaymentMethodCard:
+		if cardNumber == DeclineTestCard {
+			return false, FailureCardDeclined
+		}
+	case PaymentMethodUPI:
+		if vpa == DeclineTestVPA {
+			return false, FailureUPIDeclined
+		}
+	}
+
+	return true, ""
+}
+
 type OrderService struct {
 	Repo *store.OrderRepository
+}
+
+// CreatePaymentInput bundles payment creation parameters: nine scalars
+// would be unreadable at call sites.
+type CreatePaymentInput struct {
+	MerchantID string
+	OrderID    string
+	Amount     int64
+	Method     string
+	CardNumber string
+	VPA        string
+	Bank       string
+	Key        string
 }
 
 func newID() (string, error) {
@@ -131,13 +244,15 @@ func hashRefundRequest(paymentID string, amount int64) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
-func hashPaymentRequest(orderID string, amount int64) (string, error) {
+func hashPaymentRequest(orderID string, amount int64, method string) (string, error) {
 	normalized := struct {
 		OrderID string `json:"order_id"`
 		Amount  int64  `json:"amount"`
+		Method  string `json:"method"`
 	}{
 		OrderID: orderID,
 		Amount:  amount,
+		Method:  method,
 	}
 
 	data, err := json.Marshal(normalized)
@@ -253,32 +368,65 @@ func (s *OrderService) RefundPayment(
 
 func (s *OrderService) CreatePayment(
 	ctx context.Context,
-	merchantID string,
-	orderID string,
-	amount int64,
-	key string,
+	in CreatePaymentInput,
 ) (store.Payment, bool, error) {
-	if amount <= 0 {
+	if in.Amount <= 0 {
 		return store.Payment{}, false, ErrInvalidAmount
 	}
 
-	if amount > MaxAmount {
+	if in.Amount > MaxAmount {
 		return store.Payment{}, false, ErrAmountTooLarge
 	}
 
-	if !isValidUUID(orderID) {
+	if !isValidUUID(in.OrderID) {
 		return store.Payment{}, false, store.ErrOrderNotFound
 	}
 
-	if key == "" {
+	if in.Key == "" {
 		return store.Payment{}, false, ErrMissingIdempotencyKey
 	}
 
-	if len(key) > 255 {
+	if len(in.Key) > 255 {
 		return store.Payment{}, false, ErrIdempotencyKeyTooLong
 	}
 
-	requestHash, err := hashPaymentRequest(orderID, amount)
+	switch in.Method {
+	case PaymentMethodCard, PaymentMethodUPI, PaymentMethodNetbanking:
+		// Supported below; details validated per method.
+	default:
+		return store.Payment{}, false, ErrUnsupportedPaymentMethod
+	}
+
+	last4 := ""
+
+	switch in.Method {
+	case PaymentMethodCard:
+		if !validCardNumber(in.CardNumber) {
+			return store.Payment{}, false, ErrInvalidPaymentDetails
+		}
+
+		digits := make([]byte, 0, len(in.CardNumber))
+
+		for i := 0; i < len(in.CardNumber); i++ {
+			if in.CardNumber[i] != ' ' {
+				digits = append(digits, in.CardNumber[i])
+			}
+		}
+
+		last4 = string(digits[len(digits)-4:])
+
+	case PaymentMethodUPI:
+		if !validVPA(in.VPA) {
+			return store.Payment{}, false, ErrInvalidPaymentDetails
+		}
+
+	case PaymentMethodNetbanking:
+		if !SupportedBanks[in.Bank] {
+			return store.Payment{}, false, ErrInvalidPaymentDetails
+		}
+	}
+
+	requestHash, err := hashPaymentRequest(in.OrderID, in.Amount, in.Method)
 	if err != nil {
 		return store.Payment{}, false, err
 	}
@@ -288,17 +436,30 @@ func (s *OrderService) CreatePayment(
 		return store.Payment{}, false, err
 	}
 
+	// The full PAN / VPA lives only in this function's locals: the store
+	// receives at most the last four digits. Card data must never reach
+	// the database (PCI scope).
+	approved, failureCode := mockAuthorize(in.Method, in.CardNumber, in.VPA)
+
 	payment := store.Payment{
-		ID:     id,
-		Amount: amount,
+		ID:          id,
+		Amount:      in.Amount,
+		Method:      in.Method,
+		CardLast4:   last4,
+		FailureCode: failureCode,
+		Status:      "AUTHORIZED",
+	}
+
+	if !approved {
+		payment.Status = "FAILED"
 	}
 
 	return s.Repo.CreatePaymentIdempotent(
 		ctx,
 		payment,
-		orderID,
-		merchantID,
-		key,
+		in.OrderID,
+		in.MerchantID,
+		in.Key,
 		requestHash,
 	)
 }

@@ -66,6 +66,20 @@ func testUUID(t *testing.T) string {
 	)
 }
 
+// testPayment builds a well-formed authorization fixture: the store CHECKs
+// method values and only flips orders for AUTHORIZED payments, so fixtures
+// must carry both fields to exercise the happy path.
+func testPayment(t *testing.T, amount int64) Payment {
+	t.Helper()
+
+	return Payment{
+		ID:     testUUID(t),
+		Amount: amount,
+		Method: "card",
+		Status: "AUTHORIZED",
+	}
+}
+
 func TestCreateIdempotentReplayAndConflict(t *testing.T) {
 	pool := testPool(t)
 	repo := &OrderRepository{DB: pool}

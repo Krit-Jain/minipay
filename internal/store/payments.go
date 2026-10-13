@@ -31,6 +31,9 @@ type Payment struct {
 	OrderID        string    `json:"order_id"`
 	Amount         int64     `json:"amount"`
 	Currency       string    `json:"currency"`
+	Method         string    `json:"method"`
+	CardLast4      string    `json:"card_last4,omitempty"`
+	FailureCode    string    `json:"failure_code,omitempty"`
 	Status         string    `json:"status"`
 	RefundedAmount int64     `json:"refunded_amount"`
 	CreatedAt      time.Time `json:"created_at"`
@@ -103,7 +106,9 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 
 		err = tx.QueryRow(ctx, `
 			SELECT id::text, order_id::text, amount,
-			       currency, status, refunded_amount, created_at
+			       currency, method, COALESCE(card_last4, ''),
+			       COALESCE(failure_code, ''), status,
+			       refunded_amount, created_at
 			FROM payments
 			WHERE id = $1
 		`, *existingPaymentID).Scan(
@@ -111,6 +116,9 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 			&existing.OrderID,
 			&existing.Amount,
 			&existing.Currency,
+			&existing.Method,
+			&existing.CardLast4,
+			&existing.FailureCode,
 			&existing.Status,
 			&existing.RefundedAmount,
 			&existing.CreatedAt,
@@ -160,16 +168,18 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 		return Payment{}, false, ErrPaymentAmountMismatch
 	}
 
-	// 6. Record the authorized payment in the order's currency. The funds
-	// are only held here; capture settles them (see CapturePayment).
+	// 6. Record the payment in the order's currency. Approved payments hold
+	// funds (AUTHORIZED); declined ones are recorded as FAILED with a
+	// gateway failure code and hold nothing.
 	payment.OrderID = order.ID
 	payment.Currency = order.Currency
-	payment.Status = "AUTHORIZED"
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO payments
-			(id, order_id, amount, currency, status)
-		VALUES ($1, $2, $3, $4, $5)
+			(id, order_id, amount, currency, status, method,
+			 card_last4, failure_code)
+		VALUES ($1, $2, $3, $4, $5, $6,
+		        NULLIF($7, ''), NULLIF($8, ''))
 		RETURNING created_at
 	`,
 		payment.ID,
@@ -177,19 +187,25 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 		payment.Amount,
 		payment.Currency,
 		payment.Status,
+		payment.Method,
+		payment.CardLast4,
+		payment.FailureCode,
 	).Scan(&payment.CreatedAt)
 	if err != nil {
 		return Payment{}, false, err
 	}
 
-	// 7. Mark the order authorized so it cannot be paid twice while the
-	// hold is outstanding.
-	if _, err := tx.Exec(ctx, `
-		UPDATE orders
-		SET status = 'AUTHORIZED'
-		WHERE id = $1
-	`, order.ID); err != nil {
-		return Payment{}, false, err
+	// 7. Mark the order authorized — but only for approvals. A decline
+	// leaves the order CREATED so the customer can try again; the failed
+	// payment row stays as the audit trail of the attempt.
+	if payment.Status == "AUTHORIZED" {
+		if _, err := tx.Exec(ctx, `
+			UPDATE orders
+			SET status = 'AUTHORIZED'
+			WHERE id = $1
+		`, order.ID); err != nil {
+			return Payment{}, false, err
+		}
 	}
 
 	// 8. Associate the key with the payment.
@@ -261,7 +277,9 @@ func (r *OrderRepository) GetPayment(
 
 	err := r.DB.QueryRow(ctx, `
 		SELECT p.id::text, p.order_id::text, p.amount,
-		       p.currency, p.status, p.refunded_amount, p.created_at
+		       p.currency, p.method, COALESCE(p.card_last4, ''),
+		       COALESCE(p.failure_code, ''), p.status,
+		       p.refunded_amount, p.created_at
 		FROM payments p
 		JOIN orders o ON o.id = p.order_id
 		WHERE p.id = $1 AND o.merchant_id = $2
@@ -270,6 +288,9 @@ func (r *OrderRepository) GetPayment(
 		&payment.OrderID,
 		&payment.Amount,
 		&payment.Currency,
+		&payment.Method,
+		&payment.CardLast4,
+		&payment.FailureCode,
 		&payment.Status,
 		&payment.RefundedAmount,
 		&payment.CreatedAt,
@@ -307,7 +328,9 @@ func (r *OrderRepository) CapturePayment(
 
 	err = tx.QueryRow(ctx, `
 		SELECT p.id::text, p.order_id::text, p.amount,
-		       p.currency, p.status, p.refunded_amount, p.created_at
+		       p.currency, p.method, COALESCE(p.card_last4, ''),
+		       COALESCE(p.failure_code, ''), p.status,
+		       p.refunded_amount, p.created_at
 		FROM payments p
 		JOIN orders o ON o.id = p.order_id
 		WHERE p.id = $1 AND o.merchant_id = $2
@@ -317,6 +340,9 @@ func (r *OrderRepository) CapturePayment(
 		&payment.OrderID,
 		&payment.Amount,
 		&payment.Currency,
+		&payment.Method,
+		&payment.CardLast4,
+		&payment.FailureCode,
 		&payment.Status,
 		&payment.RefundedAmount,
 		&payment.CreatedAt,
@@ -382,7 +408,9 @@ func (r *OrderRepository) VoidPayment(
 
 	err = tx.QueryRow(ctx, `
 		SELECT p.id::text, p.order_id::text, p.amount,
-		       p.currency, p.status, p.refunded_amount, p.created_at
+		       p.currency, p.method, COALESCE(p.card_last4, ''),
+		       COALESCE(p.failure_code, ''), p.status,
+		       p.refunded_amount, p.created_at
 		FROM payments p
 		JOIN orders o ON o.id = p.order_id
 		WHERE p.id = $1 AND o.merchant_id = $2
@@ -392,6 +420,9 @@ func (r *OrderRepository) VoidPayment(
 		&payment.OrderID,
 		&payment.Amount,
 		&payment.Currency,
+		&payment.Method,
+		&payment.CardLast4,
+		&payment.FailureCode,
 		&payment.Status,
 		&payment.RefundedAmount,
 		&payment.CreatedAt,

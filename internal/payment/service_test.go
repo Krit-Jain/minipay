@@ -371,3 +371,24 @@ func TestNewIDFormat(t *testing.T) {
 		t.Fatalf("uuid variant: got %c (%q)", id[19], id)
 	}
 }
+
+func TestEndpointURLValidation(t *testing.T) {
+	s := &OrderService{Repo: nil} // validation runs before any DB access
+	ctx := context.Background()
+
+	for _, bad := range []string{
+		"",
+		"not-a-url",
+		"ftp://files.example.com/hook",
+		"http://",
+		"//missing-scheme.com/hook",
+	} {
+		if _, err := s.CreateEndpoint(ctx, "m1", bad); !errors.Is(err, store.ErrInvalidEndpointURL) {
+			t.Fatalf("url %q: got %v, want ErrInvalidEndpointURL", bad, err)
+		}
+	}
+
+	if err := s.DeleteEndpoint(ctx, "m1", "not-a-uuid"); !errors.Is(err, store.ErrEndpointNotFound) {
+		t.Fatalf("bad endpoint id: got %v, want ErrEndpointNotFound", err)
+	}
+}

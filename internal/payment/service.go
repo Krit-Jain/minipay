@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"regexp"
 
 	"minipay/internal/store"
@@ -554,4 +555,37 @@ func (s *OrderService) ListRefunds(
 	}
 
 	return s.Repo.ListRefunds(ctx, merchantID, paymentID, limit, cursor)
+}
+
+func (s *OrderService) CreateEndpoint(
+	ctx context.Context,
+	merchantID string,
+	rawURL string,
+) (store.Endpoint, error) {
+	u, err := url.ParseRequestURI(rawURL)
+	if err != nil || u.Host == "" ||
+		(u.Scheme != "http" && u.Scheme != "https") {
+		return store.Endpoint{}, store.ErrInvalidEndpointURL
+	}
+
+	return s.Repo.CreateEndpoint(ctx, merchantID, rawURL)
+}
+
+func (s *OrderService) ListEndpoints(
+	ctx context.Context,
+	merchantID string,
+) ([]store.Endpoint, error) {
+	return s.Repo.ListEndpoints(ctx, merchantID)
+}
+
+func (s *OrderService) DeleteEndpoint(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) error {
+	if !isValidUUID(id) {
+		return store.ErrEndpointNotFound
+	}
+
+	return s.Repo.DeactivateEndpoint(ctx, merchantID, id)
 }

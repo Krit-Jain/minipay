@@ -158,6 +158,17 @@ func (r *OrderRepository) CreateIdempotent(
 		return Order{}, false, err
 	}
 
+	// 6b. First completion only — replays returned at step 4, so reaching
+	// here means this call created (or adopted) the order. The event joins
+	// the same transaction: order without event, or event without order,
+	// cannot happen.
+	if err := recordEventTx(
+		ctx, tx, order.MerchantID, EventOrderCreated,
+		order.ID, "", "", order,
+	); err != nil {
+		return Order{}, false, err
+	}
+
 	// 7. Commit both records together.
 	if err := tx.Commit(ctx); err != nil {
 		return Order{}, false, err

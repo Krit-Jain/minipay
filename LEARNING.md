@@ -236,3 +236,39 @@ verified on a scratch database before touching the live one.
 Every layer answers a different question — *where* (mux), *who* (auth), *how much/often* (limits), *what exactly*
 (handler), *is it sane* (service), *exactly once* (store) — and that separation is why a bug in any one layer
 can't silently move money.
+
+## 14. Webhooks and the transactional outbox — the town crier who writes everything down
+
+**Definitions:** A *webhook* is an HTTP callback the server sends you when something happens ("your payment
+was captured"), so you don't have to keep asking. The *transactional outbox* is the pattern that makes those
+callbacks reliable: the event is written to an `events` table **in the same database transaction** as the state
+change it describes.
+
+**Why the outbox exists:** the naive alternatives both break under crashes. Polling ("did anything change?")
+is late and wasteful. After-commit hooks ("update the DB, then tell the merchant") die in the gap: process
+crashes after COMMIT but before the POST, and the merchant never hears about money that moved. The outbox
+closes the gap structurally — event and state commit atomically, so "captured but no event" and "event for a
+payment that rolled back" are both *impossible*, and a separate relay process delivers from the table at leisure.
+
+**How MiniPay does it:**
+- Each money transaction calls `recordEventTx` *after* linking its idempotency key but *before* commit —
+  placement matters: idempotent replays return before this line, so retries never emit twice. Only first
+  completion speaks.
+- The call fans out one `PENDING` `deliveries` row per active endpoint of the merchant.
+- A relay ticker (every 2s, inside the API process) claims due rows with `SELECT ... FOR UPDATE SKIP LOCKED`.
+  *SKIP LOCKED* is the multi-replica trick: locked rows are skipped rather than waited on, so N relay
+  replicas partition the queue instead of double-sending.
+- Claiming bumps `attempts` and parks `next_attempt_at` 30s out (a *lease*): a relay that dies mid-POST
+  automatically returns its claims to the queue. Delivery is therefore **at-least-once** — merchants must
+  dedupe on the event id, and the docs say so.
+- Each POST carries `X-Minipay-Signature`: hex HMAC-SHA256 of the raw body under the endpoint's secret.
+  HMAC (not a plain hash) because it proves *who* sent it — only MiniPay and the merchant know the secret —
+  and verification uses constant-time comparison so attackers can't forge byte-by-byte via timing.
+- Failures back off exponentially (2s, 4s, 8s … capped at 5min); after 25 attempts the delivery dead-letters
+  as `FAILED` but stays queryable. Deactivated endpoints fail their pending deliveries instead of hanging them.
+
+**Analogy:** a medieval town crier who *first writes every announcement in the town ledger*, then walks the
+route reading from it. If he collapses mid-route, the next crier picks up the ledger where the ink stops —
+no announcement is ever invented, none is ever lost, and if two criers walk at once they split the list
+instead of shouting over each other. Householders (merchants) check the wax seal (HMAC) and ignore repeat
+shoutings of the same edict (dedupe by event id).

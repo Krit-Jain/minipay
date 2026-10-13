@@ -222,6 +222,21 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 		return Payment{}, false, err
 	}
 
+	// 8b. First completion only (replays returned at step 4). Approvals
+	// and declines both emit: a decline is a completed attempt the
+	// merchant must hear about.
+	eventType := EventPaymentAuthorized
+	if payment.Status == "FAILED" {
+		eventType = EventPaymentFailed
+	}
+
+	if err := recordEventTx(
+		ctx, tx, merchantID, eventType,
+		payment.OrderID, payment.ID, "", payment,
+	); err != nil {
+		return Payment{}, false, err
+	}
+
 	// 9. Commit payment, order flip, and key linkage together.
 	if err := tx.Commit(ctx); err != nil {
 		return Payment{}, false, err
@@ -382,6 +397,15 @@ func (r *OrderRepository) CapturePayment(
 
 	payment.Status = "SUCCEEDED"
 
+	// The transition itself is the event: replays of an already-SUCCEEDED
+	// payment returned above without emitting.
+	if err := recordEventTx(
+		ctx, tx, merchantID, EventPaymentCaptured,
+		payment.OrderID, payment.ID, "", payment,
+	); err != nil {
+		return Payment{}, err
+	}
+
 	if err := tx.Commit(ctx); err != nil {
 		return Payment{}, err
 	}
@@ -461,6 +485,14 @@ func (r *OrderRepository) VoidPayment(
 	}
 
 	payment.Status = "CANCELLED"
+
+	// Same rule as capture: only the transition emits.
+	if err := recordEventTx(
+		ctx, tx, merchantID, EventPaymentVoided,
+		payment.OrderID, payment.ID, "", payment,
+	); err != nil {
+		return Payment{}, err
+	}
 
 	if err := tx.Commit(ctx); err != nil {
 		return Payment{}, err

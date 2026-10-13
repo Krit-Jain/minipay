@@ -309,6 +309,15 @@ func (r *OrderRepository) CreateRefundIdempotent(
 		return Refund{}, false, err
 	}
 
+	// 7b. First completion only — replays returned at step 4, so linking
+	// here means this call finished the refund.
+	if err := recordEventTx(
+		ctx, tx, merchantID, EventRefundCreated,
+		"", refund.PaymentID, refund.ID, refund,
+	); err != nil {
+		return Refund{}, false, err
+	}
+
 	// 8. Commit the key, the reservation, and the record together.
 	if err := tx.Commit(ctx); err != nil {
 		return Refund{}, false, err

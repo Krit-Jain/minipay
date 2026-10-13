@@ -76,6 +76,10 @@ func main() {
 		Service: orderService,
 	}
 
+	webhookHandler := &httpapi.WebhookHandler{
+		Service: orderService,
+	}
+
 	api := http.NewServeMux()
 
 	api.HandleFunc("POST /v1/orders", orderHandler.CreateOrder)
@@ -88,6 +92,9 @@ func main() {
 	api.HandleFunc("POST /v1/payments/{id}/capture", paymentHandler.CapturePayment)
 	api.HandleFunc("POST /v1/payments/{id}/void", paymentHandler.VoidPayment)
 	api.HandleFunc("POST /v1/payments/{id}/refunds", refundHandler.CreateRefund)
+	api.HandleFunc("POST /v1/webhook_endpoints", webhookHandler.CreateEndpoint)
+	api.HandleFunc("GET /v1/webhook_endpoints", webhookHandler.ListEndpoints)
+	api.HandleFunc("DELETE /v1/webhook_endpoints/{id}", webhookHandler.DeleteEndpoint)
 
 	// Budgets: generous per-IP protection for everything (including the
 	// auth lookups themselves), tighter per-merchant quotas past auth. The
@@ -135,6 +142,13 @@ func main() {
 	)
 	defer stop()
 
+	// The outbox relay runs inside the API process: every 2s it claims due
+	// webhook deliveries (SKIP LOCKED, so replicas share work) and POSTs
+	// them. It stops before the server starts draining, so in-flight HTTP
+	// keeps its full shutdown budget.
+	relayCtx, relayStop := context.WithCancel(context.Background())
+	go runRelay(relayCtx, orderRepo)
+
 	go func() {
 		slog.Info("minipay listening", "addr", server.Addr)
 
@@ -147,6 +161,7 @@ func main() {
 
 	<-sigCtx.Done()
 	slog.Info("shutdown signal received, draining in-flight requests")
+	relayStop()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(
 		context.Background(),
@@ -160,4 +175,24 @@ func main() {
 	}
 
 	slog.Info("server stopped")
+}
+
+func runRelay(ctx context.Context, repo *store.OrderRepository) {
+	client := &http.Client{Timeout: 5 * time.Second}
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			settled, err := repo.ProcessDueDeliveries(ctx, client)
+			if err != nil {
+				slog.Error("webhook relay failed", "err", err)
+			} else if settled > 0 {
+				slog.Info("webhook relay settled deliveries", "count", settled)
+			}
+		}
+	}
 }

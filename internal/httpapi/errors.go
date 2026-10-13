@@ -24,6 +24,8 @@ const (
 	CodeMissingIdempotencyKey = "missing_idempotency_key"
 	CodeInvalidIdempotencyKey = "invalid_idempotency_key"
 	CodeInvalidPaymentID      = "invalid_payment_id"
+	CodeInvalidEndpointURL    = "invalid_endpoint_url"
+	CodeEndpointNotFound      = "endpoint_not_found"
 	CodeInvalidCursor         = "invalid_cursor"
 	CodeNotFound              = "not_found"
 	CodeOrderNotFound         = "order_not_found"
@@ -70,6 +72,9 @@ func statusAndCode(err error) (int, string) {
 	case errors.Is(err, payment.ErrInvalidPaymentID):
 		return http.StatusBadRequest, CodeInvalidPaymentID
 
+	case errors.Is(err, store.ErrInvalidEndpointURL):
+		return http.StatusBadRequest, CodeInvalidEndpointURL
+
 	case errors.Is(err, store.ErrInvalidCursor),
 		errors.Is(err, ErrInvalidPagination):
 		return http.StatusBadRequest, CodeInvalidCursor
@@ -79,6 +84,9 @@ func statusAndCode(err error) (int, string) {
 
 	case errors.Is(err, store.ErrPaymentNotFound):
 		return http.StatusNotFound, CodePaymentNotFound
+
+	case errors.Is(err, store.ErrEndpointNotFound):
+		return http.StatusNotFound, CodeEndpointNotFound
 
 	case errors.Is(err, store.ErrOrderAlreadyPaid):
 		return http.StatusConflict, CodeOrderAlreadyPaid

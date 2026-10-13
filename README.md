@@ -82,6 +82,9 @@ All endpoints require `Authorization: Bearer <key>` except the probes. All money
 | `POST /v1/payments/{id}/void` | Release a hold (no body needed) | `200` |
 | `POST /v1/payments/{id}/refunds` | Refund captured funds `{amount}` | `201` / `200` replay |
 | `GET /v1/payments/{id}/refunds` | List a payment's refunds (paginated) | `200` |
+| `POST /v1/webhook_endpoints` | Register a delivery URL `{url}` (secret shown once) | `201` |
+| `GET /v1/webhook_endpoints` | List endpoints (secrets never listed) | `200` |
+| `DELETE /v1/webhook_endpoints/{id}` | Deactivate an endpoint | `204` |
 | `GET /healthz` | Liveness probe (public) | `200 ok` |
 | `GET /readyz` | Readiness probe, pings Postgres (public) | `200` / `503` |
 
@@ -117,9 +120,9 @@ Every error shares one shape, so clients can switch on `code` and quote `request
 
 | Status | Codes |
 |---|---|
-| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `unsupported_payment_method`, `invalid_payment_details`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
+| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `unsupported_payment_method`, `invalid_payment_details`, `invalid_endpoint_url`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
 | `401` | `unauthorized` (missing, unknown, or revoked key) |
-| `404` | `order_not_found`, `payment_not_found` (foreign tenants' records read as `404`) |
+| `404` | `order_not_found`, `payment_not_found`, `endpoint_not_found` (foreign tenants' records read as `404`) |
 | `409` | `idempotency_conflict`, `order_already_paid`, `refund_not_allowed`, `payment_not_capturable`, `payment_not_voidable` |
 | `429` | `rate_limited` (with `Retry-After`) |
 | `500` | `internal_error` (message generic; details in logs under `request_id`) |
@@ -137,6 +140,58 @@ curl -H "Authorization: Bearer $KEY" 'localhost:8080/v1/orders?limit=2&starting_
 
 Keyset pagination ("rows older than this id") is used instead of `OFFSET` so rows created between
 page fetches can never shift, skip, or duplicate records.
+
+### Webhooks
+
+Merchants react to events without polling. Register a URL, and every state change is POSTed
+to it as JSON:
+
+```bash
+curl -X POST localhost:8080/v1/webhook_endpoints \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"url":"https://shop.example.com/minipay-hook"}'
+# {"id":"...","url":"...","secret":"whsec_...","active":true,...}  (secret shown once)
+```
+
+Event types: `order.created`, `payment.authorized`, `payment.failed`, `payment.captured`,
+`payment.voided`, `refund.created`. Each delivery carries `X-Minipay-Event`,
+`X-Minipay-Event-ID`, `X-Minipay-Attempt`, and `X-Minipay-Signature` — the hex HMAC-SHA256
+of the raw body under your endpoint secret. Verify it before trusting the payload:
+
+```bash
+# pseudocode: recompute over the exact bytes received
+hmac_sha256(secret, raw_body) == X-Minipay-Signature
+```
+
+Delivery guarantees, honestly stated:
+
+- **At-least-once.** Events are written in the *same transaction* as the state change
+  (the outbox pattern), so "captured but no event" is impossible. A crashed relay's
+  claimed deliveries expire back into the queue. Dedupe on the event id.
+- **Retries with backoff.** 2s, 4s, 8s … capped at 5 minutes, up to 25 attempts before
+  a delivery dead-letters as `FAILED` (still queryable).
+- **Replay-safe emission.** Idempotent replays never emit twice — only first completion does.
+- **Shared work.** The relay claims with `FOR UPDATE SKIP LOCKED`, so any number of API
+  replicas split the queue instead of double-sending.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant M as Money tx
+    participant O as Outbox (events + deliveries)
+    participant R as Relay (every 2s)
+    participant E as Merchant endpoint
+    M->>O: INSERT event + deliveries (same COMMIT)
+    R->>O: claim due rows SKIP LOCKED + 30s lease
+    R->>E: POST body + X-Minipay-Signature
+    alt 2xx
+        R->>O: SUCCEEDED
+    else fail + attempts left
+        R->>O: PENDING, backoff 2s→4s→…→5min
+    else 25 attempts or endpoint dead
+        R->>O: FAILED (dead-letter, still queryable)
+    end
+```
 
 ---
 

@@ -19,7 +19,9 @@ Stdlib `net/http` + Postgres via `pgxpool`. No web framework.
 
 ## Amounts
 
-Minor units as `int64` — paise for `INR`. Never floats. `100` = ₹1.00.
+Minor units as `int64` — paise for `INR`, cents for `USD`. Never floats:
+`100` = ₹1.00 or $1.00. Supported currencies: `INR`, `USD` (anything else
+is `400`).
 
 ## Auth
 
@@ -67,10 +69,10 @@ curl -H "Authorization: Bearer $KEY" localhost:8080/v1/orders/<order-uuid>
 
 ### `POST /v1/orders/{id}/payments`
 
-Creates a mock-approved (`SUCCEEDED`) payment for a `CREATED` order and
-flips the order to `SUCCEEDED` in the same transaction. Header
-`Idempotency-Key` required — replays return `200` with the original
-payment instead of charging twice. The amount must equal the order amount.
+Authorizes (holds) the order amount for a `CREATED` order and flips the
+order to `AUTHORIZED` in the same transaction. Header `Idempotency-Key`
+required — replays return `200` with the original payment instead of
+holding twice. The amount must equal the order amount.
 
 ```bash
 curl -X POST localhost:8080/v1/orders/<order-uuid>/payments \
@@ -80,9 +82,28 @@ curl -X POST localhost:8080/v1/orders/<order-uuid>/payments \
   -d '{"amount":50000}'
 ```
 
-Responses: `201` created, `200` replay, `400` bad amount / amount mismatch,
-`404` order not found, `409` order already paid or key reused with a
-different body, `500` otherwise.
+Responses: `201` authorized, `200` replay, `400` bad amount / amount
+mismatch, `404` order not found, `409` order already paid (or held) or key
+reused with a different body, `500` otherwise.
+
+### `POST /v1/payments/{id}/capture` and `/void`
+
+Settle or release an authorized hold — no body, no idempotency key needed,
+because state transitions are naturally replay-safe (re-capturing returns
+the same `SUCCEEDED` record with `200`).
+
+```bash
+curl -X POST localhost:8080/v1/payments/<payment-uuid>/capture \
+  -H "Authorization: Bearer $KEY"
+curl -X POST localhost:8080/v1/payments/<payment-uuid>/void \
+  -H "Authorization: Bearer $KEY"
+```
+
+Capture moves payment and order to `SUCCEEDED`, which is what makes the
+funds refundable. Void moves the payment to `CANCELLED` and returns the
+order to `CREATED` so it can be paid again. Capturing a void (or voiding a
+capture) is `409`: settled money must be refunded, never voided, and a void
+can never be silently undone. Unknown ids are `404`.
 
 How idempotency works (`store/orders.go`): `INSERT ... ON CONFLICT DO NOTHING`
 into `idempotency_keys(merchant_id, key, request_hash)`, then
@@ -126,12 +147,12 @@ curl -H "Authorization: Bearer $KEY" localhost:8080/v1/payments/<payment-uuid>
 ## Lifecycle
 
 ```
-POST /v1/orders → CREATED --POST /v1/orders/{id}/payments--> SUCCEEDED
-                                                          --POST .../refunds--> refunded (partially or fully)
+POST /v1/orders → CREATED --POST .../payments--> AUTHORIZED --capture--> SUCCEEDED --refunds--> refunded
+                                           \--void--> CANCELLED (order back to CREATED, payable again)
 ```
 
 Only `SUCCEEDED` payments can be refunded, and only up to their unrefunded
-balance. A paid order rejects further payments with `409`.
+balance. A held or paid order rejects further payments with `409`.
 
 ## Run
 
@@ -145,8 +166,9 @@ go run ./cmd/api              # listens on :8080, or $PORT
 while Postgres is reachable) are public — no API key needed. The server
 drains in-flight requests for up to 10s on `SIGINT`/`SIGTERM`.
 
-Budgets: 600 req/min per client IP globally, 120 req/min per merchant
-past auth (bursts 100 / 30). Over budget returns `429` with `Retry-After`.
+Budgets: 600 req/min per client IP globally (in memory), 120 req/min per
+merchant past auth, enforced from the shared `rate_limits` table so every
+replica sees one budget. Over budget returns `429` with `Retry-After`.
 Every response carries `X-Request-ID`, mirrored in the JSON access logs.
 
 ## Test
@@ -164,8 +186,7 @@ issuance / authentication / revocation.
 
 ## Known limitations
 
-1. `INR` only; no multi-currency support yet.
-2. Payments are mock-approved synchronously — no authorize/capture split,
-   no failed-payment path yet.
-3. Rate limits are in-memory per instance — a multi-replica deploy would
-   need a shared budget store.
+1. Authorizations never expire — a held payment stays held until captured
+   or voided; real gateways auto-expire holds after days.
+2. One payment per order and full-amount only — no split or partial payments.
+3. Per-IP rate limits are still per instance; only merchant budgets are shared.

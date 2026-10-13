@@ -36,8 +36,15 @@ func main() {
 		Service: orderService,
 	}
 
+	refundHandler := &httpapi.RefundHandler{
+		Service: orderService,
+	}
+
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("/v1/orders", orderHandler.CreateOrder)
+
+	mux.HandleFunc("/v1/payments/", refundHandler.CreateRefund)
 
 	server := &http.Server{
 		Addr:              ":8080",

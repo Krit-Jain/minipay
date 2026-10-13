@@ -113,3 +113,25 @@ func (s *OrderService) CreateOrder(
 		requestHash,
 	)
 }
+
+func (s *OrderService) RefundPayment(
+	ctx context.Context,
+	paymentID string,
+	amount int64,
+) (store.Refund, error) {
+	if amount <= 0 {
+		return store.Refund{}, ErrInvalidAmount
+	}
+
+	id, err := newID()
+	if err != nil {
+		return store.Refund{}, err
+	}
+
+	return s.Repo.CreateRefund(
+		ctx,
+		paymentID,
+		id,
+		amount,
+	)
+}

@@ -195,33 +195,53 @@ func TestJanitorElectsOneWinner(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 
-	const racers = 5
+	// Hold the election lock on a separate connection: any janitor pass
+	// attempted meanwhile must lose, deterministically — try_lock never
+	// succeeds against a held lock, whenever the attempt lands.
+	holder, err := pool.Acquire(ctx)
+	if err != nil {
+		t.Fatalf("acquire holder: %v", err)
+	}
+	defer holder.Release()
 
-	winners := make(chan bool, racers)
-
-	for i := 0; i < racers; i++ {
-		go func() {
-			_, _, elected, err := repo.RunJanitor(ctx, time.Hour, 24*time.Hour)
-			if err != nil {
-				t.Errorf("janitor race: %v", err)
-				winners <- false
-
-				return
-			}
-
-			winners <- elected
-		}()
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_lock($1)`, janitorLockKey); err != nil {
+		t.Fatalf("hold lock: %v", err)
 	}
 
-	elected := 0
+	result := make(chan bool, 1)
 
-	for i := 0; i < racers; i++ {
-		if <-winners {
-			elected++
+	go func() {
+		_, _, elected, err := repo.RunJanitor(ctx, time.Hour, 24*time.Hour)
+		if err != nil {
+			t.Errorf("janitor race: %v", err)
+			result <- true
+
+			return
 		}
+
+		result <- elected
+	}()
+
+	select {
+	case elected := <-result:
+		if elected {
+			t.Fatal("janitor won against a held lock")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("janitor did not return while the lock was held")
 	}
 
-	if elected != 1 {
-		t.Fatalf("elected winners = %d, want exactly 1", elected)
+	if _, err := holder.Exec(ctx, `SELECT pg_advisory_unlock($1)`, janitorLockKey); err != nil {
+		t.Fatalf("release lock: %v", err)
+	}
+
+	// With the lock free, the same call wins.
+	_, _, elected, err := repo.RunJanitor(ctx, time.Hour, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("janitor: %v", err)
+	}
+
+	if !elected {
+		t.Fatal("janitor lost with the lock free")
 	}
 }

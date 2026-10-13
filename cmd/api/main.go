@@ -67,9 +67,10 @@ func main() {
 	api.HandleFunc("POST /v1/payments/{id}/refunds", refundHandler.CreateRefund)
 
 	// Budgets: generous per-IP protection for everything (including the
-	// auth lookups themselves), tighter per-merchant quotas past auth.
+	// auth lookups themselves), tighter per-merchant quotas past auth. The
+	// merchant budget lives in Postgres so all replicas share it.
 	ipLimiter := httpapi.NewRateLimiter(600, 100)
-	merchantLimiter := httpapi.NewRateLimiter(120, 30)
+	merchantLimiter := store.NewPostgresLimiter(db, 120, 30)
 
 	authed := httpapi.RequireAuth(
 		orderRepo,

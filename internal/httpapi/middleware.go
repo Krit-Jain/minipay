@@ -76,6 +76,13 @@ func LoggingMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// Limiter grants or denies one request for a budget key. Both the
+// in-memory limiter below and the Postgres-backed one in internal/store
+// satisfy it, so main.go can mix them per layer.
+type Limiter interface {
+	Allow(ctx context.Context, key string) (bool, time.Duration)
+}
+
 // RateLimiter is a per-key token bucket: each key sustains rate tokens per
 // second with short bursts up to burst. It is deliberately dependency-free
 // and sized for this service's scale; a Redis cell would replace it if
@@ -104,7 +111,7 @@ func NewRateLimiter(perMinute int, burst int) *RateLimiter {
 
 // Allow consumes one token for key when available. Idle buckets are swept
 // at most once a minute so the map cannot grow with one-off clients.
-func (l *RateLimiter) Allow(key string) (bool, time.Duration) {
+func (l *RateLimiter) Allow(_ context.Context, key string) (bool, time.Duration) {
 	now := time.Now()
 
 	l.mu.Lock()
@@ -150,12 +157,12 @@ func (l *RateLimiter) Allow(key string) (bool, time.Duration) {
 // keyOf selects the budget owner: client IP for the outer layer, merchant
 // ID once authenticated.
 func Limit(
-	limiter *RateLimiter,
+	limiter Limiter,
 	keyOf func(*http.Request) string,
 ) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			ok, retryAfter := limiter.Allow(keyOf(r))
+			ok, retryAfter := limiter.Allow(r.Context(), keyOf(r))
 			if !ok {
 				seconds := int64(retryAfter / time.Second)
 				if seconds < 1 {

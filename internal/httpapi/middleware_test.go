@@ -12,12 +12,12 @@ func TestRateLimiterBurstThenReject(t *testing.T) {
 	limiter := NewRateLimiter(60, 5) // 1/sec, burst of 5
 
 	for i := 0; i < 5; i++ {
-		if ok, _ := limiter.Allow("tenant"); !ok {
+		if ok, _ := limiter.Allow(t.Context(), "tenant"); !ok {
 			t.Fatalf("request %d: rejected inside burst", i+1)
 		}
 	}
 
-	ok, retryAfter := limiter.Allow("tenant")
+	ok, retryAfter := limiter.Allow(t.Context(), "tenant")
 	if ok {
 		t.Fatal("6th immediate request: allowed past burst")
 	}
@@ -27,7 +27,7 @@ func TestRateLimiterBurstThenReject(t *testing.T) {
 	}
 
 	// Other keys are unaffected.
-	if ok, _ := limiter.Allow("someone-else"); !ok {
+	if ok, _ := limiter.Allow(t.Context(), "someone-else"); !ok {
 		t.Fatal("different key: rejected by another key's usage")
 	}
 }

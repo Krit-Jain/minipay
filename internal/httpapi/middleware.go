@@ -170,10 +170,12 @@ func Limit(
 				}
 
 				w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-				http.Error(
+				WriteError(
 					w,
-					"rate limit exceeded",
+					r,
 					http.StatusTooManyRequests,
+					CodeRateLimited,
+					"rate limit exceeded",
 				)
 				return
 			}

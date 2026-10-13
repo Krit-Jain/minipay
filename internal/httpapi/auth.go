@@ -40,10 +40,12 @@ func RequireAuth(
 		}
 
 		if raw == "" {
-			http.Error(
+			WriteError(
 				w,
-				"missing or invalid Authorization header",
+				r,
 				http.StatusUnauthorized,
+				CodeUnauthorized,
+				"missing or invalid Authorization header",
 			)
 			return
 		}
@@ -53,7 +55,7 @@ func RequireAuth(
 
 		merchantID, err := repo.Authenticate(ctx, raw)
 		if err != nil {
-			http.Error(w, "invalid API key", http.StatusUnauthorized)
+			WriteError(w, r, http.StatusUnauthorized, CodeUnauthorized, "invalid API key")
 			return
 		}
 

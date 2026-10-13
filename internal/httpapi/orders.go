@@ -3,11 +3,9 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"minipay/internal/payment"
-	"minipay/internal/store"
 	"net/http"
 	"time"
 )
@@ -34,27 +32,31 @@ func (h *OrderHandler) CreateOrder(
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		WriteError(w, r, http.StatusBadRequest, CodeInvalidJSON, "invalid JSON")
 		return
 	}
 
 	// Require exactly one JSON value.
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		http.Error(
+		WriteError(
 			w,
-			"unexpected trailing JSON",
+			r,
 			http.StatusBadRequest,
+			CodeInvalidJSON,
+			"unexpected trailing JSON",
 		)
 		return
 	}
 
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
-		http.Error(
+		WriteError(
 			w,
-			"Idempotency-Key header is required",
+			r,
 			http.StatusBadRequest,
+			CodeMissingIdempotencyKey,
+			"Idempotency-Key header is required",
 		)
 		return
 	}
@@ -74,29 +76,12 @@ func (h *OrderHandler) CreateOrder(
 	)
 
 	if err != nil {
-		switch {
-		case errors.Is(err, payment.ErrInvalidAmount),
-			errors.Is(err, payment.ErrAmountTooLarge),
-			errors.Is(err, payment.ErrUnsupportedCurrency),
-			errors.Is(err, payment.ErrMissingIdempotencyKey),
-			errors.Is(err, payment.ErrIdempotencyKeyTooLong):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-
-		case errors.Is(err, store.ErrIdempotencyConflict):
-			http.Error(
-				w,
-				err.Error(),
-				http.StatusConflict,
-			)
-
-		default:
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
 			slog.Error("create order failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
-			http.Error(
-				w,
-				"could not create order",
-				http.StatusInternalServerError,
-			)
 		}
+
+		WriteErrorFor(w, r, err)
 		return
 	}
 
@@ -130,18 +115,12 @@ func (h *OrderHandler) GetOrder(
 	)
 
 	if err != nil {
-		switch {
-		case errors.Is(err, store.ErrOrderNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
-
-		default:
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
 			slog.Error("get order failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
-			http.Error(
-				w,
-				"could not fetch order",
-				http.StatusInternalServerError,
-			)
 		}
+
+		WriteErrorFor(w, r, err)
 		return
 	}
 
@@ -150,4 +129,40 @@ func (h *OrderHandler) GetOrder(
 	if err := json.NewEncoder(w).Encode(order); err != nil {
 		slog.Error("encode order response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
+}
+
+func (h *OrderHandler) ListOrders(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	limit, cursor, err := ParsePagination(r)
+	if err != nil {
+		WriteError(w, r, http.StatusBadRequest, CodeInvalidCursor, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(
+		r.Context(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	orders, hasMore, err := h.Service.ListOrders(
+		ctx,
+		MerchantFromContext(r.Context()),
+		cursor,
+		limit,
+	)
+
+	if err != nil {
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
+			slog.Error("list orders failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
+		}
+
+		WriteErrorFor(w, r, err)
+		return
+	}
+
+	writeList(w, r, orders, hasMore)
 }

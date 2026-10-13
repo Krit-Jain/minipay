@@ -59,9 +59,12 @@ func main() {
 	api := http.NewServeMux()
 
 	api.HandleFunc("POST /v1/orders", orderHandler.CreateOrder)
+	api.HandleFunc("GET /v1/orders", orderHandler.ListOrders)
 	api.HandleFunc("GET /v1/orders/{id}", orderHandler.GetOrder)
 	api.HandleFunc("POST /v1/orders/{id}/payments", paymentHandler.CreatePayment)
+	api.HandleFunc("GET /v1/payments", paymentHandler.ListPayments)
 	api.HandleFunc("GET /v1/payments/{id}", paymentHandler.GetPayment)
+	api.HandleFunc("GET /v1/payments/{id}/refunds", refundHandler.ListRefunds)
 	api.HandleFunc("POST /v1/payments/{id}/capture", paymentHandler.CapturePayment)
 	api.HandleFunc("POST /v1/payments/{id}/void", paymentHandler.VoidPayment)
 	api.HandleFunc("POST /v1/payments/{id}/refunds", refundHandler.CreateRefund)

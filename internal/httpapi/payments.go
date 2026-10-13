@@ -3,14 +3,12 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
-	"net/http"
-	"time"
-
 	"minipay/internal/payment"
 	"minipay/internal/store"
+	"net/http"
+	"time"
 )
 
 type CreatePaymentRequest struct {
@@ -36,27 +34,31 @@ func (h *PaymentHandler) CreatePayment(
 	decoder.DisallowUnknownFields()
 
 	if err := decoder.Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		WriteError(w, r, http.StatusBadRequest, CodeInvalidJSON, "invalid JSON")
 		return
 	}
 
 	// Require exactly one JSON value.
 	var extra any
 	if err := decoder.Decode(&extra); err != io.EOF {
-		http.Error(
+		WriteError(
 			w,
-			"unexpected trailing JSON",
+			r,
 			http.StatusBadRequest,
+			CodeInvalidJSON,
+			"unexpected trailing JSON",
 		)
 		return
 	}
 
 	key := r.Header.Get("Idempotency-Key")
 	if key == "" {
-		http.Error(
+		WriteError(
 			w,
-			"Idempotency-Key header is required",
+			r,
 			http.StatusBadRequest,
+			CodeMissingIdempotencyKey,
+			"Idempotency-Key header is required",
 		)
 		return
 	}
@@ -76,31 +78,12 @@ func (h *PaymentHandler) CreatePayment(
 	)
 
 	if err != nil {
-		switch {
-		case errors.Is(err, payment.ErrInvalidAmount),
-			errors.Is(err, payment.ErrAmountTooLarge),
-			errors.Is(err, store.ErrPaymentAmountMismatch):
-			http.Error(w, err.Error(), http.StatusBadRequest)
-
-		case errors.Is(err, store.ErrOrderNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
-
-		case errors.Is(err, store.ErrOrderAlreadyPaid),
-			errors.Is(err, store.ErrIdempotencyConflict):
-			http.Error(
-				w,
-				err.Error(),
-				http.StatusConflict,
-			)
-
-		default:
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
 			slog.Error("create payment failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
-			http.Error(
-				w,
-				"could not create payment",
-				http.StatusInternalServerError,
-			)
 		}
+
+		WriteErrorFor(w, r, err)
 		return
 	}
 
@@ -134,18 +117,12 @@ func (h *PaymentHandler) GetPayment(
 	)
 
 	if err != nil {
-		switch {
-		case errors.Is(err, store.ErrPaymentNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
-
-		default:
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
 			slog.Error("get payment failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
-			http.Error(
-				w,
-				"could not fetch payment",
-				http.StatusInternalServerError,
-			)
 		}
+
+		WriteErrorFor(w, r, err)
 		return
 	}
 
@@ -154,6 +131,42 @@ func (h *PaymentHandler) GetPayment(
 	if err := json.NewEncoder(w).Encode(payment); err != nil {
 		slog.Error("encode payment response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
+}
+
+func (h *PaymentHandler) ListPayments(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	limit, cursor, err := ParsePagination(r)
+	if err != nil {
+		WriteError(w, r, http.StatusBadRequest, CodeInvalidCursor, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(
+		r.Context(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	payments, hasMore, err := h.Service.ListPayments(
+		ctx,
+		MerchantFromContext(r.Context()),
+		cursor,
+		limit,
+	)
+
+	if err != nil {
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
+			slog.Error("list payments failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
+		}
+
+		WriteErrorFor(w, r, err)
+		return
+	}
+
+	writeList(w, r, payments, hasMore)
 }
 
 func (h *PaymentHandler) CapturePayment(
@@ -204,26 +217,12 @@ func (h *PaymentHandler) transition(
 	}
 
 	if err != nil {
-		switch {
-		case errors.Is(err, store.ErrPaymentNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
-
-		case errors.Is(err, store.ErrPaymentNotCapturable),
-			errors.Is(err, store.ErrPaymentNotVoidable):
-			http.Error(
-				w,
-				err.Error(),
-				http.StatusConflict,
-			)
-
-		default:
+		status, _ := statusAndCode(err)
+		if status == http.StatusInternalServerError {
 			slog.Error(action+" payment failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
-			http.Error(
-				w,
-				"could not "+action+" payment",
-				http.StatusInternalServerError,
-			)
 		}
+
+		WriteErrorFor(w, r, err)
 		return
 	}
 

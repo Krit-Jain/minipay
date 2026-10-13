@@ -350,3 +350,47 @@ func (s *OrderService) VoidPayment(
 
 	return s.Repo.VoidPayment(ctx, merchantID, id)
 }
+
+func (s *OrderService) ListOrders(
+	ctx context.Context,
+	merchantID string,
+	cursor string,
+	limit int,
+) ([]store.Order, bool, error) {
+	if cursor != "" && !isValidUUID(cursor) {
+		return nil, false, store.ErrInvalidCursor
+	}
+
+	return s.Repo.ListOrders(ctx, merchantID, limit, cursor)
+}
+
+func (s *OrderService) ListPayments(
+	ctx context.Context,
+	merchantID string,
+	cursor string,
+	limit int,
+) ([]store.Payment, bool, error) {
+	if cursor != "" && !isValidUUID(cursor) {
+		return nil, false, store.ErrInvalidCursor
+	}
+
+	return s.Repo.ListPayments(ctx, merchantID, limit, cursor)
+}
+
+func (s *OrderService) ListRefunds(
+	ctx context.Context,
+	merchantID string,
+	paymentID string,
+	cursor string,
+	limit int,
+) ([]store.Refund, bool, error) {
+	if !isValidUUID(paymentID) {
+		return nil, false, store.ErrPaymentNotFound
+	}
+
+	if cursor != "" && !isValidUUID(cursor) {
+		return nil, false, store.ErrInvalidCursor
+	}
+
+	return s.Repo.ListRefunds(ctx, merchantID, paymentID, limit, cursor)
+}

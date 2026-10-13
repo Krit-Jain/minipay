@@ -7,11 +7,12 @@ Stdlib `net/http` + Postgres via `pgxpool`. No web framework.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/api/main.go` | Wiring: DB pool → repo → service → handlers → `ServeMux` on `:8080` |
-| `internal/httpapi/` | HTTP validation, JSON parsing, status-code mapping (`orders.go`, `refunds.go`) |
+| `cmd/api/main.go` | Wiring: DB pool → repo → service → handlers → `ServeMux` on `:8080`, wrapped in `RequireAuth` |
+| `cmd/apikey/main.go` | CLI that mints secret API keys (`go run ./cmd/apikey -merchant acme`) |
+| `internal/httpapi/` | Auth middleware + context (`auth.go`), validation, JSON parsing, status-code mapping |
 | `internal/payment/` | Business rules: amount > 0, `INR` only, `Idempotency-Key` required, UUIDv4 + SHA256 request hash |
-| `internal/store/` | Postgres transactions (`orders.go` idempotent create, `refunds.go` idempotent atomic refund) |
-| `migrations/` | Authoritative schema, applied in order (`0001_init.sql`, `0002_refund_idempotency.sql`) |
+| `internal/store/` | Postgres transactions (idempotent orders/payments/refunds, key issuance + lookup in `apikeys.go`) |
+| `migrations/` | Authoritative schema, applied in order (`0001`–`0004`) |
 | `internal/payment/service_test.go` | Unit tests (no DB needed) |
 | `internal/store/store_test.go` | DB integration tests (need `DATABASE_URL`, skip otherwise) |
 
@@ -19,15 +20,33 @@ Stdlib `net/http` + Postgres via `pgxpool`. No web framework.
 
 Minor units as `int64` — paise for `INR`. Never floats. `100` = ₹1.00.
 
+## Auth
+
+Every request needs `Authorization: Bearer <key>`, minted per merchant:
+
+```bash
+DATABASE_URL=... go run ./cmd/apikey -merchant acme
+# api key (shown once, store it now): sk_test_...
+```
+
+Only key hashes are stored; raw keys can't be recovered. Missing, unknown,
+or revoked keys get `401` before any handler runs. All idempotency keys and
+reads are scoped to the authenticated merchant — one merchant cannot see
+or touch another's orders, payments, or refunds (foreign ids read as
+`404`, foreign refunds fail as `409`).
+
+The examples below assume `KEY=<your key>` and pass
+`-H "Authorization: Bearer $KEY"` on every call.
+
 ## API
 
 ### `POST /v1/orders`
 
 Header `Idempotency-Key: <opaque client key>` (required, ≤255 chars).
-Merchant is currently hardcoded to `demo-merchant` (see limitations).
 
 ```bash
 curl -X POST localhost:8080/v1/orders \
+  -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: order-123' \
   -d '{"amount":50000,"currency":"INR"}'
@@ -42,7 +61,7 @@ Returns the order (`200`), or `404` for unknown/malformed ids. The `status`
 field shows the lifecycle: `CREATED` → `SUCCEEDED` once paid.
 
 ```bash
-curl localhost:8080/v1/orders/<order-uuid>
+curl -H "Authorization: Bearer $KEY" localhost:8080/v1/orders/<order-uuid>
 ```
 
 ### `POST /v1/orders/{id}/payments`
@@ -54,6 +73,7 @@ payment instead of charging twice. The amount must equal the order amount.
 
 ```bash
 curl -X POST localhost:8080/v1/orders/<order-uuid>/payments \
+  -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: pay-123' \
   -d '{"amount":50000}'
@@ -71,10 +91,10 @@ order + link key in the same transaction.
 ### `POST /v1/payments/{id}/refunds`
 
 Header `Idempotency-Key: <opaque client key>` (required, ≤255 chars).
-Merchant is currently hardcoded to `demo-merchant`, like orders.
 
 ```bash
 curl -X POST localhost:8080/v1/payments/<payment-uuid>/refunds \
+  -H "Authorization: Bearer $KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: refund-123' \
   -d '{"amount":10000}'
@@ -99,7 +119,7 @@ Returns the payment with its `refunded_amount` (`200`), or `404`.
 Payments are scoped to the merchant through their order.
 
 ```bash
-curl localhost:8080/v1/payments/<payment-uuid>
+curl -H "Authorization: Bearer $KEY" localhost:8080/v1/payments/<payment-uuid>
 ```
 
 ## Lifecycle
@@ -127,13 +147,15 @@ make test                     # vet + full suite (DB tests skip without DATABASE
 DATABASE_URL=... go test ./internal/store/ -v   # DB integration tests
 ```
 
-Unit tests cover validation, hashing, and UUID shape. Store integration
-tests cover idempotent order replay + conflict + crash-orphan adoption,
-and refund replay + conflict + atomic over-refund rejection.
+Unit tests cover validation, hashing, UUID shape, and auth rejection
+without a database. Store integration tests cover idempotent order replay
++ conflict + crash-orphan adoption, the payment lifecycle + rejections,
+refund replay + conflict + atomic over-refund rejection, and key
+issuance / authentication / revocation.
 
 ## Known limitations
 
-1. No auth; single hardcoded merchant; `INR` only.
+1. `INR` only; no multi-currency support yet.
 2. No graceful shutdown, health checks, rate limiting, or structured logs.
 3. Payments are mock-approved synchronously — no authorize/capture split,
    no failed-payment path yet.

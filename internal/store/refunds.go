@@ -250,8 +250,11 @@ func (r *OrderRepository) CreateRefundIdempotent(
 	}
 
 	// 6. Reserve the refundable balance unless a previous attempt already
-	// did. A failure here rolls back the whole transaction, including the
-	// PENDING row inserted above.
+	// did. The EXISTS clause scopes the reservation to this merchant's own
+	// payments through their orders: refunding another merchant's payment
+	// finds no row and fails as ErrRefundNotAllowed instead of leaking
+	// money across tenants. A failure here rolls back the whole
+	// transaction, including the PENDING row inserted above.
 	if !reserved {
 		var updatedPaymentID string
 
@@ -263,10 +266,16 @@ func (r *OrderRepository) CreateRefundIdempotent(
 			  AND $1 > 0
 			  AND $1 <= amount
 			  AND refunded_amount <= amount - $1
+			  AND EXISTS (
+				SELECT 1 FROM orders o
+				WHERE o.id = payments.order_id
+				  AND o.merchant_id = $3
+			  )
 			RETURNING id::text
 		`,
 			amount,
 			paymentID,
+			merchantID,
 		).Scan(&updatedPaymentID)
 
 		if errors.Is(err, pgx.ErrNoRows) {

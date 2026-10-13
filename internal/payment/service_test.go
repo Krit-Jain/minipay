@@ -201,7 +201,8 @@ func TestHashPaymentRequestDeterministic(t *testing.T) {
 	}
 }
 
-func TestHashRequestDeterministic(t *testing.T) {	h1, err := hashRequest(100, "INR")
+func TestHashRequestDeterministic(t *testing.T) {
+	h1, err := hashRequest(100, "INR")
 	if err != nil {
 		t.Fatal(err)
 	}

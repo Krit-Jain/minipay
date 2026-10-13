@@ -69,7 +69,7 @@ func (h *PaymentHandler) CreatePayment(
 
 	pay, created, err := h.Service.CreatePayment(
 		ctx,
-		"demo-merchant",
+		MerchantFromContext(r.Context()),
 		orderID,
 		req.Amount,
 		key,
@@ -129,7 +129,7 @@ func (h *PaymentHandler) GetPayment(
 
 	payment, err := h.Service.GetPayment(
 		ctx,
-		"demo-merchant",
+		MerchantFromContext(r.Context()),
 		r.PathValue("id"),
 	)
 

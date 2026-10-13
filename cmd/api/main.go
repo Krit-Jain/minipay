@@ -54,7 +54,7 @@ func main() {
 
 	server := &http.Server{
 		Addr:              ":8080",
-		Handler:           mux,
+		Handler:           httpapi.RequireAuth(orderRepo, mux),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 

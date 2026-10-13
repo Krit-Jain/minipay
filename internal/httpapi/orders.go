@@ -67,7 +67,7 @@ func (h *OrderHandler) CreateOrder(
 
 	order, created, err := h.Service.CreateOrder(
 		ctx,
-		"demo-merchant",
+		MerchantFromContext(r.Context()),
 		req.Amount,
 		req.Currency,
 		key,
@@ -125,7 +125,7 @@ func (h *OrderHandler) GetOrder(
 
 	order, err := h.Service.GetOrder(
 		ctx,
-		"demo-merchant",
+		MerchantFromContext(r.Context()),
 		r.PathValue("id"),
 	)
 

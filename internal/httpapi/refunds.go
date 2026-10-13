@@ -78,7 +78,7 @@ func (h *RefundHandler) CreateRefund(
 
 	refund, created, err := h.Service.RefundPayment(
 		ctx,
-		"demo-merchant",
+		MerchantFromContext(r.Context()),
 		paymentID,
 		req.Amount,
 		key,

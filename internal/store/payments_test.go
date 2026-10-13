@@ -43,18 +43,46 @@ func TestCreatePaymentLifecycle(t *testing.T) {
 		t.Fatal("initial payment: created = false, want true")
 	}
 
-	if first.Status != "SUCCEEDED" {
-		t.Fatalf("payment status = %q, want SUCCEEDED", first.Status)
+	if first.Status != "AUTHORIZED" {
+		t.Fatalf("payment status = %q, want AUTHORIZED", first.Status)
 	}
 
 	if first.OrderID != order.ID || first.Currency != "INR" {
 		t.Fatalf("payment not linked to order: %+v", first)
 	}
 
-	// The order must have flipped to SUCCEEDED in the same transaction.
+	// The order must have flipped to AUTHORIZED in the same transaction.
 	got, err := repo.GetOrder(ctx, merchant, order.ID)
 	if err != nil {
-		t.Fatalf("get order after pay: %v", err)
+		t.Fatalf("get order after authorize: %v", err)
+	}
+
+	if got.Status != "AUTHORIZED" {
+		t.Fatalf("order status = %q, want AUTHORIZED", got.Status)
+	}
+
+	// Capturing settles both payment and order, and recapturing replays.
+	captured, err := repo.CapturePayment(ctx, merchant, first.ID)
+	if err != nil {
+		t.Fatalf("capture: %v", err)
+	}
+
+	if captured.Status != "SUCCEEDED" {
+		t.Fatalf("captured status = %q, want SUCCEEDED", captured.Status)
+	}
+
+	recaptured, err := repo.CapturePayment(ctx, merchant, first.ID)
+	if err != nil {
+		t.Fatalf("recapture: %v", err)
+	}
+
+	if recaptured.ID != first.ID || recaptured.Status != "SUCCEEDED" {
+		t.Fatalf("recapture: unexpected record %+v", recaptured)
+	}
+
+	got, err = repo.GetOrder(ctx, merchant, order.ID)
+	if err != nil {
+		t.Fatalf("get order after capture: %v", err)
 	}
 
 	if got.Status != "SUCCEEDED" {
@@ -188,5 +216,97 @@ func TestCreatePaymentRejects(t *testing.T) {
 
 	if _, err := repo.GetPayment(ctx, "other-merchant", payment.ID); !errors.Is(err, ErrPaymentNotFound) {
 		t.Fatalf("cross-merchant read: got %v, want ErrPaymentNotFound", err)
+	}
+}
+
+func TestVoidReleasesOrder(t *testing.T) {
+	pool := testPool(t)
+	repo := &OrderRepository{DB: pool}
+	ctx := context.Background()
+	merchant := "test-merchant-" + testUUID(t)[:8]
+
+	order, _, err := repo.CreateIdempotent(ctx, Order{
+		ID:         testUUID(t),
+		MerchantID: merchant,
+		Amount:     50000,
+		Currency:   "INR",
+		Status:     "CREATED",
+	}, "void-order-key", "vhash-order")
+	if err != nil {
+		t.Fatalf("fixture order: %v", err)
+	}
+
+	held, _, err := repo.CreatePaymentIdempotent(
+		ctx,
+		Payment{ID: testUUID(t), Amount: 50000},
+		order.ID,
+		merchant,
+		"void-pay-key",
+		"vhash-pay",
+	)
+	if err != nil {
+		t.Fatalf("authorize: %v", err)
+	}
+
+	// A held payment cannot be refunded: the money has not moved yet.
+	if _, _, err := repo.CreateRefundIdempotent(
+		ctx, held.ID, testUUID(t), 10000, merchant, "void-ref-key", "vhash-ref",
+	); !errors.Is(err, ErrRefundNotAllowed) {
+		t.Fatalf("refund of authorized payment: got %v, want ErrRefundNotAllowed", err)
+	}
+
+	voided, err := repo.VoidPayment(ctx, merchant, held.ID)
+	if err != nil {
+		t.Fatalf("void: %v", err)
+	}
+
+	if voided.Status != "CANCELLED" {
+		t.Fatalf("voided status = %q, want CANCELLED", voided.Status)
+	}
+
+	// Re-voiding replays; capturing a void is rejected so a void can never
+	// be silently undone.
+	revoided, err := repo.VoidPayment(ctx, merchant, held.ID)
+	if err != nil {
+		t.Fatalf("re-void: %v", err)
+	}
+
+	if revoided.ID != held.ID {
+		t.Fatalf("re-void: id = %q, want %q", revoided.ID, held.ID)
+	}
+
+	if _, err := repo.CapturePayment(ctx, merchant, held.ID); !errors.Is(err, ErrPaymentNotCapturable) {
+		t.Fatalf("capture after void: got %v, want ErrPaymentNotCapturable", err)
+	}
+
+	// The order is payable again with a fresh key.
+	retry, created, err := repo.CreatePaymentIdempotent(
+		ctx,
+		Payment{ID: testUUID(t), Amount: 50000},
+		order.ID,
+		merchant,
+		"void-retry-key",
+		"vhash-retry",
+	)
+	if err != nil {
+		t.Fatalf("repay after void: %v", err)
+	}
+
+	if !created || retry.Status != "AUTHORIZED" {
+		t.Fatalf("repay after void: unexpected %+v created=%v", retry, created)
+	}
+
+	// And a settled payment cannot be voided: money that moved must be
+	// refunded instead.
+	if _, err := repo.CapturePayment(ctx, merchant, retry.ID); err != nil {
+		t.Fatalf("capture retry: %v", err)
+	}
+
+	if _, err := repo.VoidPayment(ctx, merchant, retry.ID); !errors.Is(err, ErrPaymentNotVoidable) {
+		t.Fatalf("void after capture: got %v, want ErrPaymentNotVoidable", err)
+	}
+
+	if _, err := repo.CapturePayment(ctx, merchant, testUUID(t)); !errors.Is(err, ErrPaymentNotFound) {
+		t.Fatalf("capture unknown: got %v, want ErrPaymentNotFound", err)
 	}
 }

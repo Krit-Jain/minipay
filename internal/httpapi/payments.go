@@ -155,3 +155,81 @@ func (h *PaymentHandler) GetPayment(
 		slog.Error("encode payment response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
 }
+
+func (h *PaymentHandler) CapturePayment(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	h.transition(w, r, "capture")
+}
+
+func (h *PaymentHandler) VoidPayment(
+	w http.ResponseWriter,
+	r *http.Request,
+) {
+	h.transition(w, r, "void")
+}
+
+// transition runs capture/void, which share everything except the service
+// call and the conflict errors: both are replay-safe 200s, 404 on unknown
+// ids, 409 on illegal states.
+func (h *PaymentHandler) transition(
+	w http.ResponseWriter,
+	r *http.Request,
+	action string,
+) {
+	ctx, cancel := context.WithTimeout(
+		r.Context(),
+		5*time.Second,
+	)
+	defer cancel()
+
+	var (
+		payment store.Payment
+		err     error
+	)
+
+	if action == "capture" {
+		payment, err = h.Service.CapturePayment(
+			ctx,
+			MerchantFromContext(r.Context()),
+			r.PathValue("id"),
+		)
+	} else {
+		payment, err = h.Service.VoidPayment(
+			ctx,
+			MerchantFromContext(r.Context()),
+			r.PathValue("id"),
+		)
+	}
+
+	if err != nil {
+		switch {
+		case errors.Is(err, store.ErrPaymentNotFound):
+			http.Error(w, err.Error(), http.StatusNotFound)
+
+		case errors.Is(err, store.ErrPaymentNotCapturable),
+			errors.Is(err, store.ErrPaymentNotVoidable):
+			http.Error(
+				w,
+				err.Error(),
+				http.StatusConflict,
+			)
+
+		default:
+			slog.Error(action+" payment failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
+			http.Error(
+				w,
+				"could not "+action+" payment",
+				http.StatusInternalServerError,
+			)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	if err := json.NewEncoder(w).Encode(payment); err != nil {
+		slog.Error("encode payment response", "request_id", RequestIDFromContext(r.Context()), "err", err)
+	}
+}

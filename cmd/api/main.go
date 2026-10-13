@@ -62,6 +62,8 @@ func main() {
 	api.HandleFunc("GET /v1/orders/{id}", orderHandler.GetOrder)
 	api.HandleFunc("POST /v1/orders/{id}/payments", paymentHandler.CreatePayment)
 	api.HandleFunc("GET /v1/payments/{id}", paymentHandler.GetPayment)
+	api.HandleFunc("POST /v1/payments/{id}/capture", paymentHandler.CapturePayment)
+	api.HandleFunc("POST /v1/payments/{id}/void", paymentHandler.VoidPayment)
 	api.HandleFunc("POST /v1/payments/{id}/refunds", refundHandler.CreateRefund)
 
 	// Budgets: generous per-IP protection for everything (including the

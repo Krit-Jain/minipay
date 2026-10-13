@@ -171,6 +171,19 @@ func TestCreatePaymentValidation(t *testing.T) {
 	}
 }
 
+func TestCaptureVoidValidation(t *testing.T) {
+	s := &OrderService{Repo: nil} // validation runs before any DB access
+	ctx := context.Background()
+
+	if _, err := s.CapturePayment(ctx, "m1", "not-a-uuid"); !errors.Is(err, store.ErrPaymentNotFound) {
+		t.Fatalf("capture bad ID: got %v, want ErrPaymentNotFound", err)
+	}
+
+	if _, err := s.VoidPayment(ctx, "m1", "not-a-uuid"); !errors.Is(err, store.ErrPaymentNotFound) {
+		t.Fatalf("void bad ID: got %v, want ErrPaymentNotFound", err)
+	}
+}
+
 func TestHashPaymentRequestDeterministic(t *testing.T) {
 	orderID, err := newID()
 	if err != nil {

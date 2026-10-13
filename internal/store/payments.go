@@ -18,6 +18,14 @@ var ErrPaymentAmountMismatch = errors.New(
 
 var ErrPaymentNotFound = errors.New("payment not found")
 
+var ErrPaymentNotCapturable = errors.New(
+	"only authorized payments can be captured",
+)
+
+var ErrPaymentNotVoidable = errors.New(
+	"only authorized payments can be voided",
+)
+
 type Payment struct {
 	ID             string    `json:"id"`
 	OrderID        string    `json:"order_id"`
@@ -28,8 +36,8 @@ type Payment struct {
 	CreatedAt      time.Time `json:"created_at"`
 }
 
-// CreatePaymentIdempotent records a mock-approved (SUCCEEDED) payment for a
-// CREATED order and flips the order to SUCCEEDED, exactly once per
+// CreatePaymentIdempotent records an AUTHORIZED payment for a CREATED
+// order and flips the order to AUTHORIZED, exactly once per
 // (merchant, key):
 //
 //  1. Claim the key, then lock and inspect it. Same key + different request
@@ -152,10 +160,11 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 		return Payment{}, false, ErrPaymentAmountMismatch
 	}
 
-	// 6. Record the approved payment in the order's currency.
+	// 6. Record the authorized payment in the order's currency. The funds
+	// are only held here; capture settles them (see CapturePayment).
 	payment.OrderID = order.ID
 	payment.Currency = order.Currency
-	payment.Status = "SUCCEEDED"
+	payment.Status = "AUTHORIZED"
 
 	err = tx.QueryRow(ctx, `
 		INSERT INTO payments
@@ -173,10 +182,11 @@ func (r *OrderRepository) CreatePaymentIdempotent(
 		return Payment{}, false, err
 	}
 
-	// 7. Flip the order so it cannot be paid twice.
+	// 7. Mark the order authorized so it cannot be paid twice while the
+	// hold is outstanding.
 	if _, err := tx.Exec(ctx, `
 		UPDATE orders
-		SET status = 'SUCCEEDED'
+		SET status = 'AUTHORIZED'
 		WHERE id = $1
 	`, order.ID); err != nil {
 		return Payment{}, false, err
@@ -270,6 +280,158 @@ func (r *OrderRepository) GetPayment(
 	}
 
 	if err != nil {
+		return Payment{}, err
+	}
+
+	return payment, nil
+}
+
+// CapturePayment settles an AUTHORIZED payment: payment and order both move
+// to SUCCEEDED in one transaction, which is what makes the funds refundable.
+// The transition is naturally replay-safe — capturing a SUCCEEDED payment
+// returns it unchanged — while capturing a CANCELLED one is rejected, so a
+// void can never be silently undone. The row lock serializes concurrent
+// captures of the same payment.
+func (r *OrderRepository) CapturePayment(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) (Payment, error) {
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		return Payment{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var payment Payment
+
+	err = tx.QueryRow(ctx, `
+		SELECT p.id::text, p.order_id::text, p.amount,
+		       p.currency, p.status, p.refunded_amount, p.created_at
+		FROM payments p
+		JOIN orders o ON o.id = p.order_id
+		WHERE p.id = $1 AND o.merchant_id = $2
+		FOR UPDATE OF p
+	`, id, merchantID).Scan(
+		&payment.ID,
+		&payment.OrderID,
+		&payment.Amount,
+		&payment.Currency,
+		&payment.Status,
+		&payment.RefundedAmount,
+		&payment.CreatedAt,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Payment{}, ErrPaymentNotFound
+	}
+
+	if err != nil {
+		return Payment{}, err
+	}
+
+	if payment.Status == "SUCCEEDED" {
+		if err := tx.Commit(ctx); err != nil {
+			return Payment{}, err
+		}
+
+		return payment, nil
+	}
+
+	if payment.Status != "AUTHORIZED" {
+		return Payment{}, ErrPaymentNotCapturable
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE payments SET status = 'SUCCEEDED' WHERE id = $1
+	`, payment.ID); err != nil {
+		return Payment{}, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE orders SET status = 'SUCCEEDED' WHERE id = $1
+	`, payment.OrderID); err != nil {
+		return Payment{}, err
+	}
+
+	payment.Status = "SUCCEEDED"
+
+	if err := tx.Commit(ctx); err != nil {
+		return Payment{}, err
+	}
+
+	return payment, nil
+}
+
+// VoidPayment releases an AUTHORIZED hold: the payment moves to CANCELLED
+// and the order returns to CREATED so the customer can try paying again.
+// Anything but AUTHORIZED is rejected — a settled payment must be refunded,
+// not voided, because the money has already moved.
+func (r *OrderRepository) VoidPayment(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) (Payment, error) {
+	tx, err := r.DB.Begin(ctx)
+	if err != nil {
+		return Payment{}, err
+	}
+	defer tx.Rollback(ctx)
+
+	var payment Payment
+
+	err = tx.QueryRow(ctx, `
+		SELECT p.id::text, p.order_id::text, p.amount,
+		       p.currency, p.status, p.refunded_amount, p.created_at
+		FROM payments p
+		JOIN orders o ON o.id = p.order_id
+		WHERE p.id = $1 AND o.merchant_id = $2
+		FOR UPDATE OF p
+	`, id, merchantID).Scan(
+		&payment.ID,
+		&payment.OrderID,
+		&payment.Amount,
+		&payment.Currency,
+		&payment.Status,
+		&payment.RefundedAmount,
+		&payment.CreatedAt,
+	)
+
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Payment{}, ErrPaymentNotFound
+	}
+
+	if err != nil {
+		return Payment{}, err
+	}
+
+	if payment.Status == "CANCELLED" {
+		if err := tx.Commit(ctx); err != nil {
+			return Payment{}, err
+		}
+
+		return payment, nil
+	}
+
+	if payment.Status != "AUTHORIZED" {
+		return Payment{}, ErrPaymentNotVoidable
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE payments SET status = 'CANCELLED' WHERE id = $1
+	`, payment.ID); err != nil {
+		return Payment{}, err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		UPDATE orders SET status = 'CREATED' WHERE id = $1
+	`, payment.OrderID); err != nil {
+		return Payment{}, err
+	}
+
+	payment.Status = "CANCELLED"
+
+	if err := tx.Commit(ctx); err != nil {
 		return Payment{}, err
 	}
 

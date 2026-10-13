@@ -318,3 +318,27 @@ func (s *OrderService) GetPayment(
 
 	return s.Repo.GetPayment(ctx, merchantID, id)
 }
+
+func (s *OrderService) CapturePayment(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) (store.Payment, error) {
+	if !isValidUUID(id) {
+		return store.Payment{}, store.ErrPaymentNotFound
+	}
+
+	return s.Repo.CapturePayment(ctx, merchantID, id)
+}
+
+func (s *OrderService) VoidPayment(
+	ctx context.Context,
+	merchantID string,
+	id string,
+) (store.Payment, error) {
+	if !isValidUUID(id) {
+		return store.Payment{}, store.ErrPaymentNotFound
+	}
+
+	return s.Repo.VoidPayment(ctx, merchantID, id)
+}

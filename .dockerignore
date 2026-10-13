@@ -1,0 +1,11 @@
+.git
+.env
+bin/
+dist/
+*.exe
+*.test
+*.out
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

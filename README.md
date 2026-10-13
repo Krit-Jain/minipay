@@ -17,13 +17,13 @@ and retries, crashes, and tenant mix-ups can't create or destroy money.
 
 | Area | What you get |
 |------|--------------|
-| 💰 Orders, payments, refunds | Full intent → hold → settle → refund lifecycle |
-| 🔁 Idempotency | Safe retries on all money endpoints (`201` first, `200` replay, `409` on conflict) |
-| 🔐 Auth | Per-merchant API keys (hashed at rest), full tenant isolation |
-| 📄 Lists | Cursor-paginated `GET` endpoints for orders, payments, refunds |
-| 🧾 Errors | Machine-readable envelope with stable codes + request IDs |
-| 🛡️ Hardening | Rate limits (per-IP + shared per-merchant), probes, graceful shutdown, structured logs |
-| 💱 Currencies | `INR` (paise) + `USD` (cents), integer minor units only |
+| Orders, payments, refunds | Full intent → hold → settle → refund lifecycle |
+| Idempotency | Safe retries on all money endpoints (`201` first, `200` replay, `409` on conflict) |
+| Auth | Per-merchant API keys (hashed at rest), full tenant isolation |
+| Lists | Cursor-paginated `GET` endpoints for orders, payments, refunds |
+| Errors | Machine-readable envelope with stable codes + request IDs |
+| Hardening | Rate limits (per-IP + shared per-merchant), probes, graceful shutdown, structured logs |
+| Currencies | `INR` (paise) + `USD` (cents), integer minor units only |
 
 ---
 
@@ -187,6 +187,33 @@ reservation. See [LEARNING.md](LEARNING.md) §6 for the full story.
 - **Shutdown:** `SIGINT`/`SIGTERM` drains in-flight requests up to 10s.
 - **Logs:** JSON on stdout; every line and every response carries `X-Request-ID`.
 - **Timeouts:** 5s header / 10s read+write / 60s idle; 5s per-request DB contexts.
+- **Boot:** missing `DATABASE_URL` or an invalid `PORT` fails fast with a clear
+  error instead of a broken server.
+
+## Deploy with Docker
+
+The repo ships a production-like local stack: Postgres, one-shot migrations, then the API.
+Boot order is enforced by health checks, not sleeps.
+
+```bash
+docker compose up --build
+DATABASE_URL=postgres://minipay:minipay@localhost:5432/minipay?sslmode=disable \
+  go run ./cmd/apikey -merchant acme
+curl localhost:8080/healthz   # ok
+```
+
+What each piece does:
+
+- **Dockerfile** — multi-stage build: compiles a static `minipay` binary on
+  `golang:1.27-alpine`, then ships only the binary on `alpine:3.20` (no toolchain,
+  no shell, no source in the final image).
+- **compose.yml** — `db` (Postgres 16 with a data volume and health check),
+  `migrate` (applies every file in `migrations/` with `ON_ERROR_STOP`, runs exactly
+  once), `api` (starts only after migrations succeed).
+- **CI** (`.github/workflows/ci.yml`) — on every push and PR: `go vet`, `go build`,
+  a Docker image build, `compose config` validation, all migrations applied to a
+  fresh database, then the full suite with a real `DATABASE_URL` so no integration
+  test silently skips.
 
 ---
 
@@ -220,16 +247,6 @@ Amounts are integer minor units (paise/cents) — never floats. IDs are app-gene
 Request fingerprints are SHA256. API secrets are stored as hashes only.
 
 ---
-
-## Roadmap
-
-- [x] **A — Envelope + listings** (this phase): stable error codes, cursor pagination
-- [ ] **B — Deployability:** multi-stage Docker, compose, CI, boot validation
-- [ ] **C — Gateway realism:** payment methods (card/UPI/netbanking validation) + decline path
-- [ ] **D — Webhooks:** transactional outbox, HMAC-signed delivery, retries
-- [ ] **E — Fees + disputes:** basis-point math, chargeback lifecycle
-- [ ] **F — Janitor jobs:** hold expiry, key GC, advisory-lock election
-- [ ] **G — Proof:** Prometheus metrics, audit trail, k6 load tests
 
 ## Known limitations
 

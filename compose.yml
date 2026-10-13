@@ -1,0 +1,51 @@
+# Local production-like stack: Postgres, one-shot migrations, then the API.
+# Boot order is enforced by health checks, not sleeps: the API only starts
+# after `migrate` exits 0, which only runs after Postgres is ready.
+#
+#   docker compose up --build
+#   docker compose exec api ...            # no: mint keys from the host instead:
+#   DATABASE_URL=postgres://minipay:minipay@localhost:5432/minipay?sslmode=disable \
+#     go run ./cmd/apikey -merchant acme
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: minipay
+      POSTGRES_PASSWORD: minipay
+      POSTGRES_DB: minipay
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U minipay -d minipay"]
+      interval: 2s
+      timeout: 2s
+      retries: 15
+
+  migrate:
+    image: postgres:16-alpine
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./migrations:/migrations:ro
+    environment:
+      DATABASE_URL: postgres://minipay:minipay@db:5432/minipay?sslmode=disable
+    # ON_ERROR_STOP keeps a half-applied migration from looking green.
+    command: >
+      sh -c 'for f in /migrations/*.sql; do
+        psql "$$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$$f" || exit 1;
+      done'
+
+  api:
+    build: .
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgres://minipay:minipay@db:5432/minipay?sslmode=disable
+      PORT: 8080
+    ports:
+      - "8080:8080"
+
+volumes:
+  pgdata:

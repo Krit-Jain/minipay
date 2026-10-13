@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -15,12 +17,30 @@ import (
 	"minipay/internal/store"
 )
 
+// resolvePort maps $PORT to a listen port: empty means 8080, anything else
+// must be a valid TCP port number.
+func resolvePort(raw string) (string, error) {
+	if raw == "" {
+		return "8080", nil
+	}
+
+	port, err := strconv.Atoi(raw)
+	if err != nil || port < 1 || port > 65535 {
+		return "", fmt.Errorf("PORT must be 1-65535, got %q", raw)
+	}
+
+	return strconv.Itoa(port), nil
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, nil)))
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
+	// Fail fast on bad config: a clear fatal at boot beats a bind error
+	// three log lines later, or a server on the wrong port.
+	port, err := resolvePort(os.Getenv("PORT"))
+	if err != nil {
+		slog.Error("invalid PORT", "err", err)
+		os.Exit(1)
 	}
 
 	ctx, cancel := context.WithTimeout(

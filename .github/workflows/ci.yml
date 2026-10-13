@@ -1,0 +1,52 @@
+# CI: every push and PR gets vet, a Docker build, migration validation on a
+# fresh database, and the full test suite (DB-backed tests included — the
+# postgres service makes DATABASE_URL real, so nothing silently skips).
+name: ci
+
+on: [push, pull_request]
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 2s
+          --health-timeout 2s
+          --health-retries 15
+
+    env:
+      DATABASE_URL: postgres://postgres:postgres@localhost:5432/minipay?sslmode=disable
+      PGPASSWORD: postgres
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - run: go vet ./...
+
+      - run: go build ./...
+
+      - run: docker build -t minipay:ci .
+
+      - run: docker compose config --quiet
+
+      # Fresh database: proves every migration applies in order, cleanly.
+      - run: psql -h localhost -U postgres -c "CREATE DATABASE minipay;"
+      - run: |
+          for f in migrations/*.sql; do
+            psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f "$f" || exit 1
+          done
+
+      - run: go test ./... -count=1

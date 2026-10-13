@@ -272,3 +272,32 @@ route reading from it. If he collapses mid-route, the next crier picks up the le
 no announcement is ever invented, none is ever lost, and if two criers walk at once they split the list
 instead of shouting over each other. Householders (merchants) check the wax seal (HMAC) and ignore repeat
 shoutings of the same edict (dedupe by event id).
+
+## 15. Fees and disputes — how the platform earns, and how it loses
+
+**Definitions:** A *basis point* (bps) is 1/100th of a percent — 200bps = 2%. A *chargeback* (dispute) is
+the customer going around the merchant: their bank pulls the money back, and the gateway must withhold it
+while both sides argue.
+
+**Platform fees without floats:** `fee = amount × 200 / 10000 + flat` (300 paise / 30 cents), all integer.
+`50000 × 200 / 10000 = 1000 + 300 = 1300` — exact. The fractional-paise case (`101 × 2% = 2.02`) truncates
+deterministically; money that cannot exist as coins cannot be charged. Fees compute in the service from
+*immutable* fields (amount/currency never change after creation), so there is no read-then-write race, and
+the capture transaction re-validates state anyway.
+
+**Disputes as balance holds, not money movement:** opening a dispute increments `disputed_amount` (conditional,
+race-safe, same shape as the refund reservation), which the balance query subtracts — the merchant simply
+cannot count withheld money. `WON` decrements it back (release); `LOST` moves it to `refunded_amount`
+(settled loss, indistinguishable from a refund on the books). Only one `OPEN` dispute per payment exists
+(partial unique index): identical reopens replay, differing ones conflict — idempotency-by-state instead of
+a fourth key table.
+
+**Why the balance never mixes currencies:** adding paise to cents is a category error, so `GET /v1/balance`
+returns per-currency nets. And it counts only `SUCCEEDED` payments minus refunds, dispute holds, and fees —
+holds and failures are not the merchant's money yet (or ever).
+
+**Analogy:** a market stallholder's end-of-day tin. The platform takes its fixed stall fee + 2% of sales
+(fees). A customer claims a jar of honey was bad and the market office holds that jar's coins in a sealed
+envelope (dispute OPEN, excluded from tonight's count). Proven fresh honey → envelope opened back into the
+tin (WON). Proven spoiled → coins handed to the customer, recorded as a sale reversed (LOST ≈ refund). And
+rupees and dollars are counted in separate piles, because no one adds apples to oranges.

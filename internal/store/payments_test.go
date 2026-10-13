@@ -15,6 +15,7 @@ func TestCreatePaymentLifecycle(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
 
 	order, _, err := repo.CreateIdempotent(ctx, Order{
 		ID:         testUUID(t),
@@ -143,6 +144,7 @@ func TestCreatePaymentRejects(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
 
 	// Unknown order.
 	if _, _, err := repo.CreatePaymentIdempotent(
@@ -229,6 +231,7 @@ func TestVoidReleasesOrder(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
 
 	order, _, err := repo.CreateIdempotent(ctx, Order{
 		ID:         testUUID(t),
@@ -321,6 +324,7 @@ func TestDeclinedPaymentLeavesOrderPayable(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
 
 	order, _, err := repo.CreateIdempotent(ctx, Order{
 		ID:         testUUID(t),

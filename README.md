@@ -82,6 +82,11 @@ All endpoints require `Authorization: Bearer <key>` except the probes. All money
 | `POST /v1/payments/{id}/void` | Release a hold (no body needed) | `200` |
 | `POST /v1/payments/{id}/refunds` | Refund captured funds `{amount}` | `201` / `200` replay |
 | `GET /v1/payments/{id}/refunds` | List a payment's refunds (paginated) | `200` |
+| `POST /v1/payments/{id}/disputes` | Open a chargeback hold `{amount, reason}` | `201` / `200` replay |
+| `POST /v1/disputes/{id}/resolve` | Settle a dispute `{outcome: won|lost}` | `200` |
+| `GET /v1/disputes` | List disputes (paginated) | `200` |
+| `GET /v1/disputes/{id}` | Fetch one dispute | `200` |
+| `GET /v1/balance` | Net receivable per currency | `200` |
 | `POST /v1/webhook_endpoints` | Register a delivery URL `{url}` (secret shown once) | `201` |
 | `GET /v1/webhook_endpoints` | List endpoints (secrets never listed) | `200` |
 | `DELETE /v1/webhook_endpoints/{id}` | Deactivate an endpoint | `204` |
@@ -110,6 +115,39 @@ documented test triggers: card `4000000000000002` → `card_declined`, VPA `fail
 `failure_code` — the failed row is the audit trail, and the order stays `CREATED`
 so the customer can try again. `FAILED` payments can never be captured or refunded.
 
+### Fees, disputes, and balance
+
+Every capture takes the platform's cut: **200 basis points (2%) + a flat fee**
+(300 paise / 30 cents), computed in integer math and stored on the payment:
+
+```bash
+curl -H "Authorization: Bearer $KEY" localhost:8080/v1/balance
+# {"balances":[{"currency":"INR","net_receivable":38700}]}
+```
+
+Net receivable per currency = captured − refunded − disputed holds − fees. Holds,
+failures, and other merchants' money never count.
+
+When a customer complains through their bank, open a dispute to withhold the amount
+while it is investigated:
+
+```bash
+curl -X POST localhost:8080/v1/payments/<payment-uuid>/disputes \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"amount":10000,"reason":"fraud"}'
+# {"id":"...","status":"OPEN",...}  (reopening identical terms replays it)
+
+curl -X POST localhost:8080/v1/disputes/<dispute-uuid>/resolve \
+  -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
+  -d '{"outcome":"lost"}'
+```
+
+Reasons: `fraud`, `not_received`, `duplicate`, `cancelled`, `other`. Only `SUCCEEDED`
+payments can be disputed and only up to their free balance; one `OPEN` dispute per
+payment (a second identical open replays, a differing one conflicts). Resolving `won`
+releases the hold; resolving `lost` converts it into settled loss, exactly like a
+refund. All three transitions emit webhook events (`dispute.opened/won/lost`).
+
 ### Error envelope
 
 Every error shares one shape, so clients can switch on `code` and quote `request_id` to support:
@@ -120,10 +158,10 @@ Every error shares one shape, so clients can switch on `code` and quote `request
 
 | Status | Codes |
 |---|---|
-| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `unsupported_payment_method`, `invalid_payment_details`, `invalid_endpoint_url`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
+| `400` | `invalid_request`, `invalid_json`, `invalid_amount`, `amount_too_large`, `amount_mismatch`, `unsupported_currency`, `unsupported_payment_method`, `invalid_payment_details`, `invalid_endpoint_url`, `invalid_dispute`, `missing_idempotency_key`, `invalid_idempotency_key`, `invalid_payment_id`, `invalid_cursor` |
 | `401` | `unauthorized` (missing, unknown, or revoked key) |
-| `404` | `order_not_found`, `payment_not_found`, `endpoint_not_found` (foreign tenants' records read as `404`) |
-| `409` | `idempotency_conflict`, `order_already_paid`, `refund_not_allowed`, `payment_not_capturable`, `payment_not_voidable` |
+| `404` | `order_not_found`, `payment_not_found`, `endpoint_not_found`, `dispute_not_found` (foreign tenants' records read as `404`) |
+| `409` | `idempotency_conflict`, `order_already_paid`, `refund_not_allowed`, `payment_not_capturable`, `payment_not_voidable`, `dispute_not_allowed`, `dispute_not_open` |
 | `429` | `rate_limited` (with `Retry-After`) |
 | `500` | `internal_error` (message generic; details in logs under `request_id`) |
 

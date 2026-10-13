@@ -85,6 +85,7 @@ func TestCreateIdempotentReplayAndConflict(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
 	key := "test-key-replay"
 
 	first := Order{
@@ -148,6 +149,7 @@ func TestCreateRefundAtomicity(t *testing.T) {
 	pool := testPool(t)
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
+	cleanupMerchant(t, repo, "test-merchant")
 
 	orderID := testUUID(t)
 	paymentID := testUUID(t)
@@ -207,6 +209,7 @@ func TestCreateRefundIdempotentReplayAndConflict(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
 	key := "test-refund-key"
 
 	orderID := testUUID(t)
@@ -299,6 +302,7 @@ func TestCreateIdempotentAdoptsOrphan(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
 	key := "test-orphan-key"
 	orphanID := testUUID(t)
 

@@ -31,6 +31,8 @@ func TestListOrdersPages(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
+	cleanupMerchant(t, repo, "other-"+merchant)
 
 	var ids []string
 	for i := 0; i < 5; i++ {
@@ -105,6 +107,8 @@ func TestListPaymentsAndRefunds(t *testing.T) {
 	repo := &OrderRepository{DB: pool}
 	ctx := context.Background()
 	merchant := "test-merchant-" + testUUID(t)[:8]
+	cleanupMerchant(t, repo, merchant)
+	cleanupMerchant(t, repo, "other-"+merchant)
 
 	order := seedOrder(t, repo, merchant, "list-pay-order-key", 50000)
 

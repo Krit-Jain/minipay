@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -94,7 +94,7 @@ func (h *PaymentHandler) CreatePayment(
 			)
 
 		default:
-			log.Printf("create payment failed: %v", err)
+			slog.Error("create payment failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
 			http.Error(
 				w,
 				"could not create payment",
@@ -113,7 +113,7 @@ func (h *PaymentHandler) CreatePayment(
 	}
 
 	if err := json.NewEncoder(w).Encode(pay); err != nil {
-		log.Printf("encode payment response: %v", err)
+		slog.Error("encode payment response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
 }
 
@@ -139,7 +139,7 @@ func (h *PaymentHandler) GetPayment(
 			http.Error(w, err.Error(), http.StatusNotFound)
 
 		default:
-			log.Printf("get payment failed: %v", err)
+			slog.Error("get payment failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
 			http.Error(
 				w,
 				"could not fetch payment",
@@ -152,6 +152,6 @@ func (h *PaymentHandler) GetPayment(
 	w.Header().Set("Content-Type", "application/json")
 
 	if err := json.NewEncoder(w).Encode(payment); err != nil {
-		log.Printf("encode payment response: %v", err)
+		slog.Error("encode payment response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
 }

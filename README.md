@@ -7,7 +7,8 @@ Stdlib `net/http` + Postgres via `pgxpool`. No web framework.
 
 | Path | Responsibility |
 |---|---|
-| `cmd/api/main.go` | Wiring: DB pool → repo → service → handlers → `ServeMux` on `:8080`, wrapped in `RequireAuth` |
+| `cmd/api/main.go` | Wiring: config (`PORT`), JSON logs, DB pool → repo → service → handlers → layered mux (probes public, API behind request-ID + logging + rate limits + auth), graceful shutdown |
+| `internal/httpapi/middleware.go` | `X-Request-ID` tagging, structured access logs, per-IP + per-merchant token-bucket rate limiting |
 | `cmd/apikey/main.go` | CLI that mints secret API keys (`go run ./cmd/apikey -merchant acme`) |
 | `internal/httpapi/` | Auth middleware + context (`auth.go`), validation, JSON parsing, status-code mapping |
 | `internal/payment/` | Business rules: amount > 0, `INR` only, `Idempotency-Key` required, UUIDv4 + SHA256 request hash |
@@ -135,10 +136,18 @@ balance. A paid order rejects further payments with `409`.
 ## Run
 
 ```bash
-cp .env.example .env          # set DATABASE_URL, then export it in your shell
+cp .env.example .env          # set DATABASE_URL (and optional PORT), then export them
 make migrate                  # applies migrations/*.sql in order
-go run ./cmd/api
+go run ./cmd/api              # listens on :8080, or $PORT
 ```
+
+`GET /healthz` (liveness, always `200`) and `GET /readyz` (`200` only
+while Postgres is reachable) are public — no API key needed. The server
+drains in-flight requests for up to 10s on `SIGINT`/`SIGTERM`.
+
+Budgets: 600 req/min per client IP globally, 120 req/min per merchant
+past auth (bursts 100 / 30). Over budget returns `429` with `Retry-After`.
+Every response carries `X-Request-ID`, mirrored in the JSON access logs.
 
 ## Test
 
@@ -156,6 +165,7 @@ issuance / authentication / revocation.
 ## Known limitations
 
 1. `INR` only; no multi-currency support yet.
-2. No graceful shutdown, health checks, rate limiting, or structured logs.
-3. Payments are mock-approved synchronously — no authorize/capture split,
+2. Payments are mock-approved synchronously — no authorize/capture split,
    no failed-payment path yet.
+3. Rate limits are in-memory per instance — a multi-replica deploy would
+   need a shared budget store.

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -106,7 +106,7 @@ func (h *RefundHandler) CreateRefund(
 			)
 
 		default:
-			log.Printf("create refund failed: %v", err)
+			slog.Error("create refund failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
 			http.Error(
 				w,
 				"could not create refund",
@@ -125,6 +125,6 @@ func (h *RefundHandler) CreateRefund(
 	}
 
 	if err := json.NewEncoder(w).Encode(refund); err != nil {
-		log.Printf("encode refund response: %v", err)
+		slog.Error("encode refund response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
 }

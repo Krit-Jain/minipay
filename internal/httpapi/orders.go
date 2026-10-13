@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"minipay/internal/payment"
 	"minipay/internal/store"
 	"net/http"
@@ -90,7 +90,7 @@ func (h *OrderHandler) CreateOrder(
 			)
 
 		default:
-			log.Printf("create order failed: %v", err)
+			slog.Error("create order failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
 			http.Error(
 				w,
 				"could not create order",
@@ -109,7 +109,7 @@ func (h *OrderHandler) CreateOrder(
 	}
 
 	if err := json.NewEncoder(w).Encode(order); err != nil {
-		log.Printf("encode order response: %v", err)
+		slog.Error("encode order response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
 }
 
@@ -135,7 +135,7 @@ func (h *OrderHandler) GetOrder(
 			http.Error(w, err.Error(), http.StatusNotFound)
 
 		default:
-			log.Printf("get order failed: %v", err)
+			slog.Error("get order failed", "request_id", RequestIDFromContext(r.Context()), "err", err)
 			http.Error(
 				w,
 				"could not fetch order",
@@ -148,6 +148,6 @@ func (h *OrderHandler) GetOrder(
 	w.Header().Set("Content-Type", "application/json")
 
 	if err := json.NewEncoder(w).Encode(order); err != nil {
-		log.Printf("encode order response: %v", err)
+		slog.Error("encode order response", "request_id", RequestIDFromContext(r.Context()), "err", err)
 	}
 }
